@@ -1,19 +1,21 @@
 #!/bin/zsh
-# Build a dev-signed iOS app on this laptop, serve it as an itms-services OTA link over
-# tailnet HTTPS, and Taildrop the link to a tailnet iPhone.
+# Build a dev-signed iOS app on this laptop, publish it to the install server on great-lakes
+# (server/main.go behind tailscale serve :8443/ota), and Taildrop the page link to a tailnet iPhone.
 #
 # Usage: taildrop.sh <tailnet-device|-> <project-dir> <scheme> <bundle-id> [xcodebuild args...]
 #   device "-" → build + serve only, no Taildrop
 #   UDID=<udid> env → fail if the signed profile lacks that phone
+#   ACK=1 env      → app has client/TaildropAck.swift (GET /ota/api/ack on every launch; enables installed/failed.launch)
 set -euo pipefail
 
 DEV=$1 PROJ=$2 SCHEME=$3 BUNDLE=$4; shift 4
 EXTRA=("$@")
-ROOT=~/Library/Caches/taildrop-ota PORT=8799 HTTPS=8443
+ROOT=~/Library/Caches/taildrop-ota HTTPS=8443
 SLUG=${(L)SCHEME}
 BUILD=$(date +%Y%m%d%H%M)
-HOST=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
-BASE=https://$HOST:$HTTPS/ota/$SLUG
+SERVER=${TD_SERVER:-great-lakes-ts} REMOTE=taildrop-ota   # ssh host running server/main.go, and its root
+HOST=${TD_HOST:-great-lakes.tail70b2c1.ts.net}
+BASE=https://$HOST:$HTTPS/ota/$SLUG ALL=https://$HOST:$HTTPS/ota/
 
 ISSUER=$(cat ~/.appstoreconnect/issuer_id)
 KEY=$(ls ~/.appstoreconnect/private_keys/AuthKey_*.p8 | head -1)
@@ -49,38 +51,30 @@ PROFILE=$(security cms -D -i "$APP/embedded.mobileprovision")
 if [[ -n ${UDID:-} && $PROFILE != *$UDID* ]]; then echo "profile lacks $UDID — register the phone first"; exit 1; fi
 echo "  $APP — profile devices: $(echo "$PROFILE" | grep -oE '[0-9A-F]{8}-[0-9A-F]{16}' | tr '\n' ' ')"
 
-echo "▶ package → $BASE/"
+echo "▶ package"
 OUT=$ROOT/$SLUG; rm -rf $OUT; mkdir -p $OUT/pkg/Payload
 cp -R "$APP" $OUT/pkg/Payload/
 (cd $OUT/pkg && zip -qry ../app.ipa Payload); rm -rf $OUT/pkg
 NAME=$(plutil -extract CFBundleDisplayName raw "$APP/Info.plist" 2>/dev/null || plutil -extract CFBundleName raw "$APP/Info.plist")
 VER=$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")
-cat > $OUT/manifest.plist <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>items</key><array><dict>
-<key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>$BASE/app.ipa</string></dict></array>
-<key>metadata</key><dict><key>bundle-identifier</key><string>$BUNDLE</string><key>bundle-version</key><string>$BUILD</string><key>kind</key><string>software</string><key>title</key><string>$NAME</string></dict>
-</dict></array></dict></plist>
-EOF
 ICONS=("$APP"/AppIcon60x60@2x.png(N) "$APP"/AppIcon*.png(N))
 if (( $#ICONS )); then cp "${ICONS[1]}" $OUT/icon.png
 else magick -size 120x120 xc:black -fill white -font "/System/Library/Fonts/Supplemental/Arial Bold.ttf" -pointsize 72 -gravity center -annotate 0 "${NAME[1]}" $OUT/icon.png
 fi
-echo '<meta http-equiv="refresh" content="0;url=../">' > $OUT/index.html   # old per-app links → all-installs page
-python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","version","build","base","bundle"],sys.argv[1:]),built=time.time())))' \
-  $SLUG "$NAME" $VER $BUILD $BASE $BUNDLE > $OUT/meta.json
+python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","version","build","bundle"],sys.argv[1:6]),ack=int(sys.argv[6]),built=time.time())))' \
+  $SLUG "$NAME" $VER $BUILD $BUNDLE ${ACK:-0} > $OUT/meta.json
 
-echo "▶ serve (localhost:$PORT ← tailscale serve :$HTTPS/ota, tailnet only)"
-curl -s "http://127.0.0.1:$PORT/api/events?since=9e9" | grep -q '^\[' || {
-  pkill -f "http.server $PORT" || true; pkill -f "ota_server.py" || true
-  nohup python3 ${0:A:h}/ota_server.py $ROOT $PORT >$ROOT/server.log 2>&1 & sleep 1; }
-tailscale serve --bg --https=$HTTPS --set-path /ota http://127.0.0.1:$PORT >/dev/null 2>&1
-sleep 1
-ALL=https://$HOST:$HTTPS/ota/
-for u in $ALL $BASE/manifest.plist $BASE/icon.png; do
+echo "▶ publish → $SERVER:$REMOTE/$SLUG (server/main.go, behind tailscale serve :$HTTPS/ota)"
+# Self-heal: start the server's restart loop and the tailnet route if either is missing.
+ssh $SERVER 'pgrep -f "server -root" >/dev/null || (cd ~/taildrop && nohup ./run.sh >>server.log 2>&1 </dev/null &)
+  /usr/local/bin/tailscale --socket=/var/run/tailscaled.socket serve --bg --https='$HTTPS' --set-path /ota http://127.0.0.1:8799 >/dev/null'
+# Stage in <slug>.new, then swap dirs, so the page never sees a new ipa with an old meta.json.
+ssh $SERVER "rm -rf $REMOTE/$SLUG.new && mkdir -p $REMOTE/$SLUG.new"
+rsync -a $OUT/app.ipa $OUT/icon.png $OUT/meta.json $SERVER:$REMOTE/$SLUG.new/
+ssh $SERVER "cd $REMOTE && rm -rf $SLUG.old && { [ ! -d $SLUG ] || mv $SLUG $SLUG.old; } && mv $SLUG.new $SLUG && rm -rf $SLUG.old"
+for u in $ALL $BASE/icon.png $BASE/manifest.plist; do   # no ?a= → health check, no attempt logged
   code=$(curl -s -o /dev/null -w '%{http_code}' "$u")
-  echo "  ${u#https://$HOST:$HTTPS} $code"; [[ $code == 200 ]] || { echo "link not serving"; exit 1; }
+  echo "  ${u#https://$HOST:$HTTPS} $code"; [[ $code == 200 ]] || { echo "link not serving — is the server up on $SERVER?"; exit 1; }
 done
 
 [[ $DEV == - ]] && { echo "link: $ALL"; exit 0; }

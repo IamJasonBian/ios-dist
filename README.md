@@ -22,9 +22,9 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
  │   app.ipa · manifest.plist · icon.png · meta.json                │
  │        │                                                         │
  │        ▼                                                         │
- │ ota_server.py  127.0.0.1:8799                                    │
+ │ (old local server; now server/main.go on great-lakes — see below)│
  │   /            all-installs page + status banner JS              │
- │   /api/events  manifest / ipa / launch events ← events.jsonl     │
+ │   /api/attempt/<id>  per-tap state · /api/ack  launch ACK        │
  │        ▲                                                         │
  │ tailscale serve  :8443/ota   (HTTPS, tailnet-only)               │
  └────────┬───────────────────────────────────┬─────────────────────┘
@@ -34,12 +34,12 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
  PHONE  great-lakes-leader (iPhone 15 Pro)    │
  ┌────────────────────────────────────────────┴─────────────────────┐
  │ 2. Files → Tailscale → link → Safari: /ota/  → tap Install       │
- │ 4. banner polls /api/events every 3s:                            │
+ │ 4. banner polls /api/attempt/<id> every 3s:                      │
  │      red   server unreachable · no download in 45s               │
  │      green app.ipa downloaded                                    │
  │ 5. iOS installs/replaces (same bundle + team → data kept)        │
  │    signature fail → iOS "Unable to Install" (native)             │
- │    [opt-in] app GETs /api/launch/<slug> → "opened ✓"             │
+ │    [ACK=1] app GETs /api/ack?bundle=&build=&vid= → installed     │
  │ 6. app runtime → backend                                         │
  └──────────────┬───────────────────────────────────────────────────┘
                 │ Chord Coach: http://100.117.72.33:8766
@@ -60,16 +60,16 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
    ├─ 3 verify   pick the .app whose CFBundleIdentifier = <bundle>
    │             $UDID set but missing from embedded.mobileprovision → exit 1
    ├─ 4 package  Payload/<app> → zip → app.ipa
-   │             manifest.plist (itms-services) · icon.png (AppIcon or letter tile)
-   │             meta.json · index.html → ../   into caches/taildrop-ota/<slug>/
-   ├─ 5 serve    start ota_server.py on :8799 if it isn't answering
-   │             tailscale serve :8443/ota → 127.0.0.1:8799
+   │             icon.png (AppIcon or letter tile) · meta.json
+   │             into caches/taildrop-ota/<slug>/ (manifest is built per tap by the server)
+   ├─ 5 publish  rsync app.ipa, icon.png, then meta.json → great-lakes:~/taildrop-ota/<slug>/
+   │             server/main.go behind tailscale serve :8443/ota
    │             /ota/, manifest.plist, icon.png must all return 200
    └─ 6 send     device "-" → print link, exit
                  else tailscale file cp "Installs link.txt" → <device>
 ```
 
-### Network (planned: server on great-lakes)
+### Network
 
 ```
                          tailnet tail70b2c1  (WireGuard, tailnet-only — no Funnel)

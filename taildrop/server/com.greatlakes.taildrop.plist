@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Install on great-lakes: sudo cp com.greatlakes.taildrop.plist /Library/LaunchDaemons/ &&
+     sudo launchctl bootstrap system /Library/LaunchDaemons/com.greatlakes.taildrop.plist
+     (stop run.sh first: pkill -f taildrop/run.sh; pkill -f taildrop/server) -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.greatlakes.taildrop</string>
+  <key>UserName</key><string>jasonzb</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/jasonzb/taildrop/server</string>
+    <string>-root</string><string>/Users/jasonzb/taildrop-ota</string>
+    <string>-addr</string><string>127.0.0.1:8799</string>
+    <string>-base</string><string>https://great-lakes.tail70b2c1.ts.net:8443/ota</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardErrorPath</key><string>/Users/jasonzb/taildrop/server.log</string>
+  <key>StandardOutPath</key><string>/Users/jasonzb/taildrop/server.log</string>
+</dict></plist>
