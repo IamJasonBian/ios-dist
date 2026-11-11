@@ -13,6 +13,7 @@ import UIKit
 
 enum TaildropAck {
     static let store = URL(string: "https://great-lakes.tail70b2c1.ts.net:8443/ota/api/ack")!
+    @MainActor private static var lastSent = Date.distantPast
 
     /// Call once at startup (App init or application(_:didFinishLaunchingWithOptions:)).
     @MainActor static func start() {
@@ -23,6 +24,9 @@ enum TaildropAck {
     }
 
     @MainActor static func send() {
+        // iOS also posts willEnterForeground right after launch; one ACK per launch is enough.
+        guard Date().timeIntervalSince(lastSent) > 5 else { return }
+        lastSent = Date()
         // identifierForVendor can be nil right after a device restart; the next foreground retries.
         guard let vid = UIDevice.current.identifierForVendor?.uuidString else { return }
         var url = URLComponents(url: store, resolvingAgainstBaseURL: false)!

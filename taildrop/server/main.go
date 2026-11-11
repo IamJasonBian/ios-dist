@@ -1,6 +1,6 @@
 // Command server is the tailnet OTA install server: one page for every app, one tracked
-// attempt per Install tap with one final state in events.jsonl, and a per-app record of
-// launch ACKs (acks.json) so installed apps' liveness is visible.
+// attempt per Install tap with one final state in events.jsonl, and launch ACKs logged to
+// the server log.
 //
 // Each app lives in <root>/<slug>/ with app.ipa, icon.png and meta.json. The manifest is
 // generated per request so every download carries its attempt id (?a=). Every status code
@@ -71,29 +71,19 @@ func (a *Attempt) Final() bool {
 	return a.State == "installed" || a.State == "failed" || (a.State == "downloaded" && !a.Ack)
 }
 
-// Seen is the launch-ACK record for one app on one phone (vid = identifierForVendor).
-type Seen struct {
-	Slug  string  `json:"slug"`
-	Vid   string  `json:"vid"`
-	Build string  `json:"build"`
-	First float64 `json:"first"`
-	Last  float64 `json:"last"`
-	Count int     `json:"count"`
-}
-
 type server struct {
 	root, base string
 	now        func() time.Time
 	mu         sync.Mutex
 	attempts   map[string]*Attempt
-	seen       map[string]*Seen   // slug + "/" + vid
+	lastBuild  map[string]string  // slug/vid → last build that phone ACKed (in memory only)
 	devices    map[string]*Device // udid → on-site registration (devices.go)
 	logf       io.Writer
 }
 
 func newServer(root, base string, logf io.Writer) *server {
 	return &server{root: root, base: strings.TrimRight(base, "/"), now: time.Now,
-		attempts: map[string]*Attempt{}, seen: map[string]*Seen{}, devices: map[string]*Device{}, logf: logf}
+		attempts: map[string]*Attempt{}, lastBuild: map[string]string{}, devices: map[string]*Device{}, logf: logf}
 }
 
 func (s *server) meta(slug string) (Meta, error) {
@@ -296,8 +286,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ack records a launch. A phone's first ACK of the current build resolves that build's
-// newest open attempt to installed; every ACK, any build, updates acks.json.
+// ack logs a launch to the server log (launch tracking is logging only, not a page feature).
+// A phone's first ACK of the current build also resolves that build's newest open attempt
+// to installed, so the install codes stay consistent.
 func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 	// Several entries can share a bundle (dev + Ad Hoc); prefer the one carrying this build.
 	var m Meta
@@ -316,16 +307,10 @@ func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := unix(s.now())
 	key := m.Slug + "/" + vid
-	sn := s.seen[key]
-	if sn == nil {
-		sn = &Seen{Slug: m.Slug, Vid: vid, First: now}
-		s.seen[key] = sn
-	}
-	firstLaunch := sn.Build != build // this phone's first launch of this build
-	sn.Build, sn.Last, sn.Count = build, now, sn.Count+1
-	s.saveSeen()
+	firstLaunch := s.lastBuild[key] != build // this phone's first launch of this build
+	s.lastBuild[key] = build
+	log.Printf("ack %s build=%s vid=%s first=%v latest=%s", m.Slug, build, vid, firstLaunch, m.Build)
 	if build != m.Build {
 		fmt.Fprint(w, "ok (stale build, latest "+m.Build+")")
 		return
@@ -347,56 +332,11 @@ func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 	fmt.Fprint(w, "ok")
 }
 
-// saveSeen writes acks.json atomically. Caller holds s.mu.
-func (s *server) saveSeen() {
-	rows := make([]*Seen, 0, len(s.seen))
-	for _, v := range s.seen {
-		rows = append(rows, v)
-	}
-	b, _ := json.MarshalIndent(rows, "", " ")
-	tmp := filepath.Join(s.root, "acks.json.tmp")
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		os.Rename(tmp, filepath.Join(s.root, "acks.json"))
-	}
-}
-
-func (s *server) loadSeen() {
-	b, err := os.ReadFile(filepath.Join(s.root, "acks.json"))
-	if err != nil {
-		return
-	}
-	var rows []*Seen
-	json.Unmarshal(b, &rows)
-	for _, v := range rows {
-		s.seen[v.Slug+"/"+v.Vid] = v
-	}
-}
-
-// lastSeen returns the newest ACK per slug and how many phones have ever ACKed it.
-func (s *server) lastSeen() map[string]map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := map[string]map[string]any{}
-	for _, v := range s.seen {
-		cur := out[v.Slug]
-		if cur == nil {
-			cur = map[string]any{"last": 0.0, "build": "", "phones": 0}
-			out[v.Slug] = cur
-		}
-		cur["phones"] = cur["phones"].(int) + 1
-		if v.Last > cur["last"].(float64) {
-			cur["last"], cur["build"] = v.Last, v.Build
-		}
-	}
-	return out
-}
-
-// status is a machine-readable view for monitors: each app, its build and its last ACK.
+// status is a machine-readable view for monitors: each app and its current build.
 func (s *server) status(w http.ResponseWriter) {
-	seen := s.lastSeen()
 	var rows []map[string]any
 	for _, m := range s.apps() {
-		rows = append(rows, map[string]any{"slug": m.Slug, "build": m.Build, "ack": m.Ack == 1, "seen": seen[m.Slug]})
+		rows = append(rows, map[string]any{"slug": m.Slug, "build": m.Build, "sign": signLabel(m.Sign)})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rows)
@@ -522,7 +462,7 @@ details{margin:0 0 4px 68px}summary{color:var(--mut);font-size:13px;padding:6px 
 <main><h1>Installs</h1>
 {{range .Apps}}<section class=app><img src="{{.Slug}}/icon.png" alt=""><div><b>{{.Name}}</b>
 <small>{{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</small>
-{{with index $.Seen .Slug}}<small>last launch {{when .last}} · {{.phones}} phone(s)</small>{{else}}{{if eq .Ack 1}}<small>no launches yet</small>{{end}}{{end}}</div>
+</div>
 <a class=btn data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
 {{with .Older}}<details><summary>{{len .}} older build{{if gt (len .) 1}}s{{end}}</summary>
 {{range .}}<div class=old><span>{{.Name}} · {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</span><a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></div>
@@ -601,7 +541,7 @@ func latestPerApp(apps []Meta) []appRow {
 
 func (s *server) page(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	data := map[string]any{"Apps": latestPerApp(s.apps()), "Seen": s.lastSeen(), "Codes": codeText(), "Base": s.base, "Deploys": s.deploys(10)}
+	data := map[string]any{"Apps": latestPerApp(s.apps()), "Codes": codeText(), "Base": s.base, "Deploys": s.deploys(10)}
 	if err := pageTmpl.Execute(w, data); err != nil {
 		log.Print(err)
 	}
@@ -638,7 +578,6 @@ func main() {
 		s.replay(rf)
 		rf.Close()
 	}
-	s.loadSeen()
 	s.loadDevices()
 	go func() {
 		for range time.Tick(5 * time.Second) {

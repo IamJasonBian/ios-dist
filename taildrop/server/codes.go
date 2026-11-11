@@ -33,7 +33,7 @@ var Codes = []Code{
 	{
 		Name:    "installed",
 		Legacy:  []string{"PROGRESS.launched"},
-		Trigger: "a phone's first GET /api/ack?bundle=&build=<this build>&vid= (apps ACK every launch; relaunches only update acks.json)",
+		Trigger: "a phone's first GET /api/ack?bundle=&build=<this build>&vid= (apps ACK every launch; every ACK is a line in server.log)",
 		Text:    "{n} installed",
 	},
 

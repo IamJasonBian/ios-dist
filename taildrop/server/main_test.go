@@ -113,8 +113,8 @@ func TestAckWithoutAttemptLogsNothing(t *testing.T) {
 	if f.log.Len() != before {
 		t.Fatalf("ack with no attempt wrote %q", f.log.String()[before:])
 	}
-	if sn := f.s.seen["demo/V1"]; sn == nil || sn.Count != 1 {
-		t.Fatalf("ack not recorded in seen: %+v", sn)
+	if f.s.lastBuild["demo/V1"] != "B2" {
+		t.Fatalf("ack not remembered: %v", f.s.lastBuild)
 	}
 }
 
@@ -126,8 +126,8 @@ func TestStaleBuildAckCountsAsSeenOnly(t *testing.T) {
 	if f.code("cur001") != "downloaded" {
 		t.Fatalf("stale-build ack resolved the attempt: %s", f.code("cur001"))
 	}
-	if sn := f.s.seen["demo/V1"]; sn.Count != 2 || sn.Build != "B1" {
-		t.Fatalf("seen = %+v, want count 2 build B1", sn)
+	if f.s.lastBuild["demo/V1"] != "B1" {
+		t.Fatalf("lastBuild = %v, want B1", f.s.lastBuild)
 	}
 }
 
@@ -192,8 +192,8 @@ func TestRelaunchOnOtherPhoneDoesNotResolve(t *testing.T) {
 
 func TestEmptyVidRejected(t *testing.T) {
 	f := newFixture(t)
-	if w := f.get("/api/ack?bundle=x.demo&build=B2&vid="); w.Code != 400 || len(f.s.seen) != 0 {
-		t.Fatalf("status %d, seen %d", w.Code, len(f.s.seen))
+	if w := f.get("/api/ack?bundle=x.demo&build=B2&vid="); w.Code != 400 || len(f.s.lastBuild) != 0 {
+		t.Fatalf("status %d, lastBuild %d", w.Code, len(f.s.lastBuild))
 	}
 }
 
