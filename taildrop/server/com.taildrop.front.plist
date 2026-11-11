@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Front door on a build machine: its tailnet /ota URL 307s every request to the store on CLUSTER.
+     Install: cp to ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.taildrop.front.plist
+     Route:   tailscale serve --bg --https=8443 --set-path /ota http://127.0.0.1:8799 -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.taildrop.front</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/jasonzb/.local/bin/taildrop-server</string>
+    <string>-addr</string><string>127.0.0.1:8799</string>
+    <string>-redirect</string><string>https://great-lakes.tail70b2c1.ts.net:8443/ota</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardErrorPath</key><string>/Users/jasonzb/Library/Logs/taildrop-front.log</string>
+</dict></plist>

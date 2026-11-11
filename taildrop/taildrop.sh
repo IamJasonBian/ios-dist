@@ -6,6 +6,7 @@
 #   device "-" → build + serve only, no Taildrop
 #   UDID=<udid> env → fail if the signed profile lacks that phone
 #   ACK=1 env      → app has client/TaildropAck.swift (GET /ota/api/ack on every launch; enables installed/failed.launch)
+#   SIGN=release-testing env → Release archive + Ad Hoc export (Apple Distribution) instead of a Debug build
 #   Phones registered on the install page (state pending) are added to the team first (ascreg),
 #   and the build must include every pending/registered phone. register-watch.sh marks them ready.
 set -euo pipefail
@@ -14,10 +15,21 @@ DEV=$1 PROJ=$2 SCHEME=$3 BUNDLE=$4; shift 4
 EXTRA=("$@")
 ROOT=~/Library/Caches/taildrop-ota HTTPS=8443
 SLUG=${(L)SCHEME}
+[[ ${SIGN:-} == release-testing ]] && SLUG=$SLUG-adhoc   # own entry on the page; never replaces the dev build
 BUILD=$(date +%Y%m%d%H%M)
 SERVER=${TD_SERVER:-great-lakes-ts} REMOTE=taildrop-ota   # ssh host running server/main.go, and its root
 HOST=${TD_HOST:-great-lakes.tail70b2c1.ts.net}
 BASE=https://$HOST:$HTTPS/ota/$SLUG ALL=https://$HOST:$HTTPS/ota/
+
+# One taildrop run at a time on this machine: builds share ~/pp-old profile parking, Xcode's
+# profile cache and (per project) build/taildrop, and register-watch.sh may run beside a manual run.
+LOCK=$ROOT/.lock; mkdir -p $ROOT
+until mkdir $LOCK 2>/dev/null; do
+  pid=$(cat $LOCK/pid 2>/dev/null || true)
+  if [[ -n $pid ]] && ! kill -0 $pid 2>/dev/null; then rm -rf $LOCK; continue; fi   # stale lock
+  echo "  waiting for another taildrop run (pid ${pid:-?}) to finish…"; sleep 15
+done
+echo $$ > $LOCK/pid; trap 'rm -rf $LOCK' EXIT
 
 ISSUER=$(cat ~/.appstoreconnect/issuer_id)
 KEY=$(ls ~/.appstoreconnect/private_keys/AuthKey_*.p8 | head -1)
@@ -41,7 +53,7 @@ for row in $NEED; do
 done
 (( $#WANT )) && echo "  build must include: $WANT" || echo "  none"
 
-echo "▶ build $SCHEME ($BUNDLE)"
+echo "▶ build $SCHEME ($BUNDLE, ${SIGN:-debugging})"
 # Xcode reuses cached team profiles even when they predate newly registered phones; park them
 # so -allowProvisioningUpdates fetches one carrying every registered device.
 PP=~/Library/Developer/Xcode/UserData/Provisioning\ Profiles; mkdir -p ~/pp-old
@@ -54,16 +66,39 @@ for f in "$PP"/*.mobileprovision(N); do
 done
 cd "$PROJ"
 [[ -f project.yml ]] && command -v xcodegen >/dev/null && xcodegen generate -q
-rm -rf build/taildrop/Build/Products/Debug-iphoneos   # never ship a previous run's .app
+rm -rf build/taildrop/Build/Products/Debug-iphoneos build/taildrop/export   # never ship a previous run's .app
 LOG=$ROOT/build-$SLUG.log; mkdir -p $ROOT
-if ! xcodebuild -scheme "$SCHEME" -configuration Debug -destination generic/platform=iOS \
-  -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$KID" -authenticationKeyIssuerID "$ISSUER" \
-  -derivedDataPath build/taildrop -quiet build CURRENT_PROJECT_VERSION=$BUILD "${EXTRA[@]}" >$LOG 2>&1; then
-  grep -E 'error:' $LOG | head -20; echo "BUILD FAILED — full log $LOG"; exit 1
+AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$KID" -authenticationKeyIssuerID "$ISSUER")
+fail() { grep -E 'error:' $LOG | head -20; echo "BUILD FAILED — full log $LOG"; exit 1; }
+if [[ ${SIGN:-} == release-testing ]]; then
+  # Ad Hoc: archive (dev-signed), then export re-signs with Apple Distribution + an ad hoc profile.
+  # teamID is left out: exportArchive defaults to the archive's team. TAILDROP keeps TaildropAck in Release.
+  XCA=build/taildrop/$SLUG.xcarchive; rm -rf $XCA
+  xcodebuild -scheme "$SCHEME" -configuration Release -destination generic/platform=iOS "${AUTH[@]}" \
+    -derivedDataPath build/taildrop -archivePath $XCA -quiet archive CURRENT_PROJECT_VERSION=$BUILD \
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) TAILDROP' "${EXTRA[@]}" >$LOG 2>&1 || fail
+  cat >build/taildrop/ExportOptions.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>method</key><string>release-testing</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>thinning</key><string>&lt;none&gt;</string>
+</dict></plist>
+EOF
+  xcodebuild -exportArchive -archivePath $XCA -exportPath build/taildrop/export \
+    -exportOptionsPlist build/taildrop/ExportOptions.plist "${AUTH[@]}" >>$LOG 2>&1 || fail
+  IPA=(build/taildrop/export/*.ipa(N)); (( $#IPA == 1 )) || { echo "export made ${#IPA} .ipa files — full log $LOG"; exit 1; }
+  rm -rf build/taildrop/unzipped && unzip -q $IPA[1] -d build/taildrop/unzipped
+  APPS=(build/taildrop/unzipped/Payload/*.app(N))
+else
+  xcodebuild -scheme "$SCHEME" -configuration Debug -destination generic/platform=iOS "${AUTH[@]}" \
+    -derivedDataPath build/taildrop -quiet build CURRENT_PROJECT_VERSION=$BUILD "${EXTRA[@]}" >$LOG 2>&1 || fail
+  IPA=() APPS=(build/taildrop/Build/Products/Debug-iphoneos/*.app(N))
 fi
 
 APP=""
-for a in build/taildrop/Build/Products/Debug-iphoneos/*.app; do
+for a in $APPS; do
   [[ $(plutil -extract CFBundleIdentifier raw "$a/Info.plist") == "$BUNDLE" ]] && APP=$a
 done
 [[ -n $APP ]] || { echo "no built .app with bundle id $BUNDLE"; exit 1; }
@@ -73,16 +108,19 @@ echo "  $APP — profile devices: $(echo "$PROFILE" | grep -oE '[0-9A-F]{8}-[0-9
 
 echo "▶ package"
 OUT=$ROOT/$SLUG; rm -rf $OUT; mkdir -p $OUT/pkg/Payload
-cp -R "$APP" $OUT/pkg/Payload/
-(cd $OUT/pkg && zip -qry ../app.ipa Payload); rm -rf $OUT/pkg
+if (( $#IPA )); then cp $IPA[1] $OUT/app.ipa
+else cp -R "$APP" $OUT/pkg/Payload/; (cd $OUT/pkg && zip -qry ../app.ipa Payload)
+fi; rm -rf $OUT/pkg
 NAME=$(plutil -extract CFBundleDisplayName raw "$APP/Info.plist" 2>/dev/null || plutil -extract CFBundleName raw "$APP/Info.plist")
 VER=$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")
 ICONS=("$APP"/AppIcon60x60@2x.png(N) "$APP"/AppIcon*.png(N))
-if (( $#ICONS )); then cp "${ICONS[1]}" $OUT/icon.png
+# App icons in the bundle are Xcode's iPhone-optimized PNGs (CgBI) that browsers can't decode; sips rewrites a standard PNG.
+if (( $#ICONS )); then sips -s format png "${ICONS[1]}" --out $OUT/icon.png >/dev/null
 else magick -size 120x120 xc:black -fill white -font "/System/Library/Fonts/Supplemental/Arial Bold.ttf" -pointsize 72 -gravity center -annotate 0 "${NAME[1]}" $OUT/icon.png
 fi
-python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","version","build","bundle"],sys.argv[1:6]),ack=int(sys.argv[6]),built=time.time())))' \
-  $SLUG "$NAME" $VER $BUILD $BUNDLE ${ACK:-0} > $OUT/meta.json
+SIGNED=${SIGN:-debugging}
+python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","version","build","bundle","sign"],sys.argv[1:7]),ack=int(sys.argv[7]),built=time.time())))' \
+  $SLUG "$NAME" $VER $BUILD $BUNDLE $SIGNED ${ACK:-0} > $OUT/meta.json
 
 echo "▶ publish → $SERVER:$REMOTE/$SLUG (server/main.go, behind tailscale serve :$HTTPS/ota)"
 # Self-heal: start the server's restart loop and the tailnet route if either is missing.
@@ -96,6 +134,13 @@ for u in $ALL $BASE/icon.png $BASE/manifest.plist; do   # no ?a= → health chec
   code=$(curl -s -o /dev/null -w '%{http_code}' "$u")
   echo "  ${u#https://$HOST:$HTTPS} $code"; [[ $code == 200 ]] || { echo "link not serving — is the server up on $SERVER?"; exit 1; }
 done
+
+# Deploy record: append-only history on the server (deploys.jsonl → /ota/api/deploys and the page).
+GIT=$(git -C "$PROJ" rev-parse --short HEAD 2>/dev/null || echo none)
+[[ -n $(git -C "$PROJ" status --porcelain 2>/dev/null) ]] && GIT=$GIT-dirty
+python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","version","build","bundle","sign","git","by"],sys.argv[1:9]),t=time.time())))' \
+  $SLUG "$NAME" $VER $BUILD $BUNDLE $SIGNED $GIT ${HOST_ALIAS:-$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["Self"]["DNSName"].split(".")[0])' 2>/dev/null || hostname -s)} | ssh $SERVER "cat >> $REMOTE/deploys.jsonl"
+echo "  deploy recorded: $SLUG $BUILD ($SIGNED, $GIT)"
 
 [[ $DEV == - ]] && { echo "link: $ALL"; exit 0; }
 echo "▶ taildrop → $DEV"

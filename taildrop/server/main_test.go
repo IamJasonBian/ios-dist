@@ -113,8 +113,8 @@ func TestAckWithoutAttemptLogsNothing(t *testing.T) {
 	if f.log.Len() != before {
 		t.Fatalf("ack with no attempt wrote %q", f.log.String()[before:])
 	}
-	if sn := f.s.seen["demo/V1"]; sn == nil || sn.Count != 1 {
-		t.Fatalf("ack not recorded in seen: %+v", sn)
+	if f.s.lastBuild["demo/V1"] != "B2" {
+		t.Fatalf("ack not remembered: %v", f.s.lastBuild)
 	}
 }
 
@@ -126,8 +126,8 @@ func TestStaleBuildAckCountsAsSeenOnly(t *testing.T) {
 	if f.code("cur001") != "downloaded" {
 		t.Fatalf("stale-build ack resolved the attempt: %s", f.code("cur001"))
 	}
-	if sn := f.s.seen["demo/V1"]; sn.Count != 2 || sn.Build != "B1" {
-		t.Fatalf("seen = %+v, want count 2 build B1", sn)
+	if f.s.lastBuild["demo/V1"] != "B1" {
+		t.Fatalf("lastBuild = %v, want B1", f.s.lastBuild)
 	}
 }
 
@@ -192,8 +192,8 @@ func TestRelaunchOnOtherPhoneDoesNotResolve(t *testing.T) {
 
 func TestEmptyVidRejected(t *testing.T) {
 	f := newFixture(t)
-	if w := f.get("/api/ack?bundle=x.demo&build=B2&vid="); w.Code != 400 || len(f.s.seen) != 0 {
-		t.Fatalf("status %d, seen %d", w.Code, len(f.s.seen))
+	if w := f.get("/api/ack?bundle=x.demo&build=B2&vid="); w.Code != 400 || len(f.s.lastBuild) != 0 {
+		t.Fatalf("status %d, lastBuild %d", w.Code, len(f.s.lastBuild))
 	}
 }
 
@@ -288,5 +288,53 @@ func TestEnrollRejectsBodyWithoutUDID(t *testing.T) {
 	f.s.ServeHTTP(w, httptest.NewRequest("POST", "/api/enroll", strings.NewReader("<plist></plist>")))
 	if w.Code != 400 || len(f.s.devices) != 0 {
 		t.Fatalf("status %d, %d devices", w.Code, len(f.s.devices))
+	}
+}
+
+func TestAckPicksEntryWithMatchingBuild(t *testing.T) {
+	f := newFixture(t)
+	os.MkdirAll(filepath.Join(f.s.root, "demo-adhoc"), 0o755)
+	os.WriteFile(filepath.Join(f.s.root, "demo-adhoc", "app.ipa"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(f.s.root, "demo-adhoc", "meta.json"),
+		[]byte(`{"slug":"demo-adhoc","name":"Demo","version":"1","build":"B5","bundle":"x.demo","built":9,"sign":"release-testing","ack":1}`), 0o644)
+	f.get("/demo/app.ipa?a=devatt") // dev entry, build B2, newer-built adhoc entry exists
+	f.get("/api/ack?bundle=x.demo&build=B2&vid=V1")
+	if got := f.code("devatt"); got != "installed" {
+		t.Fatalf("ack for dev build B2 gave %q, want installed", got)
+	}
+}
+
+func TestDeploysNewestFirstSkipsTorn(t *testing.T) {
+	f := newFixture(t)
+	os.WriteFile(filepath.Join(f.s.root, "deploys.jsonl"), []byte(
+		`{"t":1,"slug":"demo","build":"B1","sign":"debugging"}`+"\n"+`{"t":2,"slug":"de`+"\n"+
+			`{"t":3,"slug":"demo-adhoc","build":"B2","sign":"release-testing"}`+"\n"), 0o644)
+	d := f.s.deploys(10)
+	if len(d) != 2 || d[0].Build != "B2" || d[1].Build != "B1" {
+		t.Fatalf("deploys = %+v", d)
+	}
+	if body := f.get("/").Body.String(); !strings.Contains(body, "Recent deploys") || !strings.Contains(body, "Ad Hoc") {
+		t.Fatal("page lacks the deploy list")
+	}
+}
+
+func TestRedirectorKeepsPathQueryAndMethod(t *testing.T) {
+	h := redirector("https://c/ota/")
+	for _, tc := range []struct{ method, path string }{{"GET", "/"}, {"GET", "/demo/manifest.plist?a=x1"}, {"POST", "/api/enroll"}} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != 307 || w.Header().Get("Location") != "https://c/ota"+tc.path {
+			t.Fatalf("%s %s → %d %q", tc.method, tc.path, w.Code, w.Header().Get("Location"))
+		}
+	}
+}
+
+func TestLatestPerAppCollapsesByBundle(t *testing.T) {
+	rows := latestPerApp([]Meta{
+		{Slug: "chordcoach-adhoc", Bundle: "c", Built: 3}, {Slug: "postings-pr7", Bundle: "p", Built: 2},
+		{Slug: "chordcoach", Bundle: "c", Built: 1}, {Slug: "postings", Bundle: "p", Built: 0},
+	})
+	if len(rows) != 2 || rows[0].Slug != "chordcoach-adhoc" || rows[0].Older[0].Slug != "chordcoach" || rows[1].Older[0].Slug != "postings" {
+		t.Fatalf("rows = %+v", rows)
 	}
 }

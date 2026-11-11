@@ -8,29 +8,33 @@ type Code struct {
 	Name    string   // banner/log code: "<state>" or "failed.<reason>"
 	Legacy  []string // codes it replaces from the old PROGRESS/ERRORS tables
 	Trigger string   // what makes the server (or page) pick it
-	Text    string   // banner text; {n} = app name
+	Fix     string   // what to do about it (docs only; not shown on the page)
+	Text    string   // banner text, plain status only; {n} = app name
 }
 
 // Codes, in the order an install moves through them. Errors are the failed.* rows.
+//
+// TODO: first-class path for a phone that isn't in the signing profile (iOS shows "Unable
+// to Install" and tells the server nothing). Today it ends as downloaded / failed.launch.
 var Codes = []Code{
 	// ── progress ──────────────────────────────────────────────────────────────
 	{
 		Name:    "installing",
 		Legacy:  []string{"PROGRESS.installing"},
 		Trigger: "Install tapped or manifest fetched; app.ipa not fully sent yet (each chunk sent resets the idle timer)",
-		Text:    "Installing {n}…",
+		Text:    "Installing {n}",
 	},
 	{
 		Name:    "downloaded",
 		Legacy:  []string{"PROGRESS.downloaded", "PROGRESS.awaitingLaunch"},
 		Trigger: "every byte of app.ipa sent (also from failed.download, if the user sat on the iOS prompt); final for apps without a launch ACK",
-		Text:    "{n} downloaded ✓ — open it from the home screen. Icon says “Unable to Install”? This iPhone isn’t in the signing profile (or its iOS is too old): register it, rebuild, resend.",
+		Text:    "{n} downloaded",
 	},
 	{
 		Name:    "installed",
 		Legacy:  []string{"PROGRESS.launched"},
-		Trigger: "a phone's first GET /api/ack?bundle=&build=<this build>&vid= (apps ACK every launch; relaunches only update acks.json)",
-		Text:    "{n} installed and opened ✓",
+		Trigger: "a phone's first GET /api/ack?bundle=&build=<this build>&vid= (apps ACK every launch; every ACK is a line in server.log)",
+		Text:    "{n} installed",
 	},
 
 	// ── errors ────────────────────────────────────────────────────────────────
@@ -38,19 +42,22 @@ var Codes = []Code{
 		Name:    "failed.download",
 		Legacy:  []string{"ERRORS.neverDownloaded"},
 		Trigger: fmt.Sprintf("installing, and no manifest/app.ipa traffic for %v", downloadIdle),
-		Text:    "{n} never finished downloading — tap Install in the iOS prompt, or resend the link",
+		Fix:     "tap Install in the iOS prompt, or resend the link",
+		Text:    "{n} download failed",
 	},
 	{
 		Name:    "failed.launch",
 		Legacy:  []string{"ERRORS.neverLaunched", "ERRORS.unableToInstall"},
 		Trigger: fmt.Sprintf("downloaded, app has ack:1, and no launch ACK within %v", launchWait),
-		Text:    "{n} downloaded but never opened — if its icon says “Unable to Install”, register this iPhone, rebuild, resend",
+		Fix:     "open the app",
+		Text:    "{n} not opened",
 	},
 	{
 		Name:    "failed.unreachable",
 		Legacy:  []string{"ERRORS.unreachable"},
 		Trigger: "page only: the poll to the server failed, so the server never logs it. A 404 for the attempt 15 s after the tap (server never saw it) shows failed.download",
-		Text:    "Install server unreachable — is Tailscale on?",
+		Fix:     "turn Tailscale on; check the store is up",
+		Text:    "Server unreachable",
 	},
 }
 
@@ -64,9 +71,9 @@ func codeText() map[string]string {
 }
 
 // DeviceStates are a new phone's registration states (on-site registration, devices.go),
-// in order, with the text the page shows on that phone. Separate from install Codes.
+// in order, with the plain status the page shows on that phone. Separate from install Codes.
 var DeviceStates = map[string]string{
-	"pending":    "This iPhone is queued for registration. The build computer will add it to the team and rebuild — keep this page open or check back in a few minutes.",
-	"registered": "This iPhone is on the team; a build that includes it is in progress.",
-	"ready":      "This iPhone is in the signing profile — tap Install below.",
+	"pending":    "Registration queued",
+	"registered": "Registered, building",
+	"ready":      "Ready to install",
 }

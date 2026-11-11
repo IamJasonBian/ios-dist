@@ -1,6 +1,6 @@
 // Command server is the tailnet OTA install server: one page for every app, one tracked
-// attempt per Install tap with one final state in events.jsonl, and a per-app record of
-// launch ACKs (acks.json) so installed apps' liveness is visible.
+// attempt per Install tap with one final state in events.jsonl, and launch ACKs logged to
+// the server log.
 //
 // Each app lives in <root>/<slug>/ with app.ipa, icon.png and meta.json. The manifest is
 // generated per request so every download carries its attempt id (?a=). Every status code
@@ -45,7 +45,8 @@ type Meta struct {
 	Build   string  `json:"build"`
 	Bundle  string  `json:"bundle"`
 	Built   float64 `json:"built"`
-	Ack     int     `json:"ack"` // 1 = app GETs /api/ack?bundle=&build=&vid= on every launch
+	Sign    string  `json:"sign"` // debugging | release-testing; see signLabel
+	Ack     int     `json:"ack"`  // 1 = app GETs /api/ack?bundle=&build=&vid= on every launch
 }
 
 // Attempt is one Install tap, tracked from tap to its final state.
@@ -70,29 +71,19 @@ func (a *Attempt) Final() bool {
 	return a.State == "installed" || a.State == "failed" || (a.State == "downloaded" && !a.Ack)
 }
 
-// Seen is the launch-ACK record for one app on one phone (vid = identifierForVendor).
-type Seen struct {
-	Slug  string  `json:"slug"`
-	Vid   string  `json:"vid"`
-	Build string  `json:"build"`
-	First float64 `json:"first"`
-	Last  float64 `json:"last"`
-	Count int     `json:"count"`
-}
-
 type server struct {
 	root, base string
 	now        func() time.Time
 	mu         sync.Mutex
 	attempts   map[string]*Attempt
-	seen       map[string]*Seen   // slug + "/" + vid
+	lastBuild  map[string]string  // slug/vid → last build that phone ACKed (in memory only)
 	devices    map[string]*Device // udid → on-site registration (devices.go)
 	logf       io.Writer
 }
 
 func newServer(root, base string, logf io.Writer) *server {
 	return &server{root: root, base: strings.TrimRight(base, "/"), now: time.Now,
-		attempts: map[string]*Attempt{}, seen: map[string]*Seen{}, devices: map[string]*Device{}, logf: logf}
+		attempts: map[string]*Attempt{}, lastBuild: map[string]string{}, devices: map[string]*Device{}, logf: logf}
 }
 
 func (s *server) meta(slug string) (Meta, error) {
@@ -238,6 +229,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.page(w)
 	case r.URL.Path == "/api/ack": // app launch, every launch
 		s.ack(w, q.Get("bundle"), q.Get("build"), q.Get("vid"))
+	case r.URL.Path == "/api/deploys":
+		s.deploysAPI(w, r)
 	case r.URL.Path == "/api/status":
 		s.status(w)
 	case r.URL.Path == "/register.mobileconfig":
@@ -293,12 +286,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ack records a launch. A phone's first ACK of the current build resolves that build's
-// newest open attempt to installed; every ACK, any build, updates acks.json.
+// ack logs a launch to the server log (launch tracking is logging only, not a page feature).
+// A phone's first ACK of the current build also resolves that build's newest open attempt
+// to installed, so the install codes stay consistent.
 func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
+	// Several entries can share a bundle (dev + Ad Hoc); prefer the one carrying this build.
 	var m Meta
-	for _, a := range s.apps() {
-		if a.Bundle == bundle {
+	for _, a := range s.apps() { // newest first
+		if a.Bundle == bundle && (m.Slug == "" || (a.Build == build && m.Build != build)) {
 			m = a
 		}
 	}
@@ -312,16 +307,10 @@ func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := unix(s.now())
 	key := m.Slug + "/" + vid
-	sn := s.seen[key]
-	if sn == nil {
-		sn = &Seen{Slug: m.Slug, Vid: vid, First: now}
-		s.seen[key] = sn
-	}
-	firstLaunch := sn.Build != build // this phone's first launch of this build
-	sn.Build, sn.Last, sn.Count = build, now, sn.Count+1
-	s.saveSeen()
+	firstLaunch := s.lastBuild[key] != build // this phone's first launch of this build
+	s.lastBuild[key] = build
+	log.Printf("ack %s build=%s vid=%s first=%v latest=%s", m.Slug, build, vid, firstLaunch, m.Build)
 	if build != m.Build {
 		fmt.Fprint(w, "ok (stale build, latest "+m.Build+")")
 		return
@@ -343,56 +332,11 @@ func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 	fmt.Fprint(w, "ok")
 }
 
-// saveSeen writes acks.json atomically. Caller holds s.mu.
-func (s *server) saveSeen() {
-	rows := make([]*Seen, 0, len(s.seen))
-	for _, v := range s.seen {
-		rows = append(rows, v)
-	}
-	b, _ := json.MarshalIndent(rows, "", " ")
-	tmp := filepath.Join(s.root, "acks.json.tmp")
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		os.Rename(tmp, filepath.Join(s.root, "acks.json"))
-	}
-}
-
-func (s *server) loadSeen() {
-	b, err := os.ReadFile(filepath.Join(s.root, "acks.json"))
-	if err != nil {
-		return
-	}
-	var rows []*Seen
-	json.Unmarshal(b, &rows)
-	for _, v := range rows {
-		s.seen[v.Slug+"/"+v.Vid] = v
-	}
-}
-
-// lastSeen returns the newest ACK per slug and how many phones have ever ACKed it.
-func (s *server) lastSeen() map[string]map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := map[string]map[string]any{}
-	for _, v := range s.seen {
-		cur := out[v.Slug]
-		if cur == nil {
-			cur = map[string]any{"last": 0.0, "build": "", "phones": 0}
-			out[v.Slug] = cur
-		}
-		cur["phones"] = cur["phones"].(int) + 1
-		if v.Last > cur["last"].(float64) {
-			cur["last"], cur["build"] = v.Last, v.Build
-		}
-	}
-	return out
-}
-
-// status is a machine-readable view for monitors: each app, its build and its last ACK.
+// status is a machine-readable view for monitors: each app and its current build.
 func (s *server) status(w http.ResponseWriter) {
-	seen := s.lastSeen()
 	var rows []map[string]any
 	for _, m := range s.apps() {
-		rows = append(rows, map[string]any{"slug": m.Slug, "build": m.Build, "ack": m.Ack == 1, "seen": seen[m.Slug]})
+		rows = append(rows, map[string]any{"slug": m.Slug, "build": m.Build, "sign": signLabel(m.Sign)})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rows)
@@ -489,33 +433,45 @@ func (s *server) ipa(w http.ResponseWriter, r *http.Request, slug, id string) {
 }
 
 var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
-	"when": func(t float64) string { return time.Unix(int64(t), 0).Format("Jan 2 15:04") },
+	"when":     func(t float64) string { return time.Unix(int64(t), 0).Format("Jan 2 15:04") },
+	"sign":     signLabel,
+	"gitKnown": func(g string) bool { return g != "" && g != "none" },
 }).Parse(`<!doctype html><html><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1"><title>Installs</title>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name=format-detection content="telephone=no"><title>Installs</title>
 <style>
 :root{--bg:#fff;--fg:#000;--mut:#666;--line:#ddd;--ok:#0a7d32;--bad:#b00020}
 @media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#fff;--mut:#999;--line:#333;--ok:#4cd07d;--bad:#ff5c6c}}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px -apple-system,system-ui,sans-serif}
-main{max-width:560px;margin:0 auto;padding:24px 16px}
-h1{font-size:28px;margin:0 0 16px}
-.app{display:flex;gap:14px;align-items:center;padding:14px 0;border-top:1px solid var(--line)}
-.app img{width:60px;height:60px;border-radius:14px;border:1px solid var(--line)}
-.app div{flex:1;min-width:0}.app b{display:block}.app small{color:var(--mut);display:block}
-.app a{background:var(--fg);color:var(--bg);text-decoration:none;padding:8px 16px;border-radius:18px;font-weight:600}
-#st{position:sticky;top:0;padding:12px 16px;font-weight:600;display:none}
+main{max-width:560px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+h1{font-size:28px;margin:0 0 12px}
+.app{display:flex;gap:12px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
+.app img{width:56px;height:56px;border-radius:13px;border:1px solid var(--line);flex:none;background:var(--line)}
+.app div{flex:1;min-width:0}.app b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app small{color:var(--mut);display:block;font-size:13px;line-height:1.35}
+a.btn{flex:none;background:var(--fg);color:var(--bg);text-decoration:none;min-height:44px;min-width:76px;padding:0 16px;border-radius:22px;font-weight:600;display:flex;align-items:center;justify-content:center}
+details{margin:0 0 4px 68px}summary{color:var(--mut);font-size:13px;padding:6px 0;cursor:pointer}
+.old{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:13px;color:var(--mut)}.old span{flex:1;min-width:0}
+.old a{color:var(--fg);font-weight:600;min-height:44px;display:flex;align-items:center;padding:0 8px}
+#st{position:sticky;top:0;z-index:1;padding:12px 16px;padding-top:max(12px,env(safe-area-inset-top));font-weight:600;display:none}
 #st.ok{display:block;background:var(--ok);color:#fff}#st.bad{display:block;background:var(--bad);color:#fff}
 #st.run{display:block;background:var(--line)}
 #dev{padding:12px 16px;border-bottom:1px solid var(--line);display:none}
 .reg{display:block;margin:20px 0 0;color:var(--mut);font-size:14px}
+.dep{display:block;color:var(--mut);font-size:13px;padding:3px 0}
 </style></head><body><div id=st></div><div id=dev></div>
 <main><h1>Installs</h1>
 {{range .Apps}}<section class=app><img src="{{.Slug}}/icon.png" alt=""><div><b>{{.Name}}</b>
-<small>{{.Version}} ({{.Build}}) · built {{when .Built}}</small>
-<small>{{with index $.Seen .Slug}}last launch {{when .last}} · build {{.build}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch ACK in this app{{end}}{{end}}</small></div>
-<a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
+<small>{{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</small>
+</div>
+<a class=btn data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
+{{with .Older}}<details><summary>{{len .}} older build{{if gt (len .) 1}}s{{end}}</summary>
+{{range .}}<div class=old><span>{{.Name}} · {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</span><a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></div>
+{{end}}</details>{{end}}
 {{else}}<p>No apps yet.</p>{{end}}
-<a class=reg href="register.mobileconfig">New iPhone, or the icon says “Unable to Install”? Register this iPhone →</a>
-<small class=reg>Downloads a profile: Settings → Profile Downloaded → Install. It only sends this iPhone’s UDID; then the build computer adds it and rebuilds.</small></main>
+{{with .Deploys}}<h2 style="font-size:18px;margin:28px 0 8px">Recent deploys</h2>
+{{range .}}<small class=dep>{{when .T}} · {{.Name}} {{.Version}} ({{.Build}}) · {{sign .Sign}}{{if gitKnown .Git}} · {{.Git}}{{end}} · {{.By}}</small>
+{{end}}{{end}}
+<a class=reg href="register.mobileconfig">Register this iPhone</a></main>
 <script>
 const CODES={{.Codes}},BASE={{.Base}},st=document.getElementById('st');
 let cur=null;
@@ -551,9 +507,41 @@ async function devPoll(){
 devPoll();setInterval(devPoll,15000);
 </script></body></html>`))
 
+// redirector sends every request to the same path under target. 307 keeps the method and
+// body, so POSTs (e.g. /api/enroll) survive the hop; old links to another host keep working.
+func redirector(target string) http.Handler {
+	target = strings.TrimRight(target, "/")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	})
+}
+
+// appRow is one app on the page: its newest build, plus older entries that share the bundle
+// (e.g. an Ad Hoc build, or a PR build) collapsed under it.
+type appRow struct {
+	Meta
+	Older []Meta
+}
+
+// latestPerApp collapses entries with the same bundle id to the newest build; apps arrive newest first.
+func latestPerApp(apps []Meta) []appRow {
+	var rows []appRow
+	at := map[string]int{}
+	for _, m := range apps {
+		if i, ok := at[m.Bundle]; ok {
+			rows[i].Older = append(rows[i].Older, m)
+			continue
+		}
+		at[m.Bundle] = len(rows)
+		rows = append(rows, appRow{Meta: m})
+	}
+	return rows
+}
+
 func (s *server) page(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	data := map[string]any{"Apps": s.apps(), "Seen": s.lastSeen(), "Codes": codeText(), "Base": s.base}
+	data := map[string]any{"Apps": latestPerApp(s.apps()), "Codes": codeText(), "Base": s.base, "Deploys": s.deploys(10)}
 	if err := pageTmpl.Execute(w, data); err != nil {
 		log.Print(err)
 	}
@@ -563,7 +551,12 @@ func main() {
 	root := flag.String("root", "~/taildrop-ota", "directory holding <slug>/{app.ipa,icon.png,meta.json}")
 	addr := flag.String("addr", "127.0.0.1:8799", "listen address (behind tailscale serve)")
 	base := flag.String("base", "", "public base URL, e.g. https://great-lakes.tail70b2c1.ts.net:8443/ota")
+	redirect := flag.String("redirect", "", "front-door mode: 307 every request to this base URL + its path (no store)")
 	flag.Parse()
+	if *redirect != "" {
+		log.Printf("redirecting %s → %s", *addr, *redirect)
+		log.Fatal(http.ListenAndServe(*addr, redirector(*redirect)))
+	}
 	if *base == "" {
 		log.Fatal("-base is required")
 	}
@@ -585,7 +578,6 @@ func main() {
 		s.replay(rf)
 		rf.Close()
 	}
-	s.loadSeen()
 	s.loadDevices()
 	go func() {
 		for range time.Tick(5 * time.Second) {

@@ -3,6 +3,7 @@
 //
 //	ascreg -list                 print registered iOS devices (read-only; checks the key)
 //	ascreg <udid>=<name> ...     register each; an already-registered UDID counts as success
+//	ascreg -rename <udid>=<name> ...  rename registered devices (display name only)
 //
 // Exits non-zero if any registration failed.
 package main
@@ -30,6 +31,7 @@ const api = "https://api.appstoreconnect.apple.com/v1/devices"
 
 func main() {
 	list := flag.Bool("list", false, "list registered iOS devices")
+	rename := flag.Bool("rename", false, "rename registered devices: <udid>=<name> ...")
 	flag.Parse()
 	tok, err := token()
 	if err != nil {
@@ -46,6 +48,45 @@ func main() {
 		json.Unmarshal(body, &r)
 		for _, d := range r.Data {
 			fmt.Printf("%s\t%s\t%s\n", d.Attributes["udid"], d.Attributes["status"], d.Attributes["name"])
+		}
+		return
+	}
+	if *rename {
+		body, code := call(tok, "GET", api+"?filter[platform]=IOS&limit=200&fields[devices]=udid", nil)
+		if code != 200 {
+			fail(fmt.Errorf("list: HTTP %d %s", code, body))
+		}
+		var r struct {
+			Data []struct {
+				ID         string
+				Attributes map[string]string
+			}
+		}
+		json.Unmarshal(body, &r)
+		ids := map[string]string{}
+		for _, d := range r.Data {
+			ids[d.Attributes["udid"]] = d.ID
+		}
+		bad := 0
+		for _, arg := range flag.Args() {
+			udid, name, _ := strings.Cut(arg, "=")
+			id := ids[udid]
+			if id == "" || name == "" {
+				bad++
+				fmt.Fprintf(os.Stderr, "FAILED %s: not registered or no name\n", udid)
+				continue
+			}
+			req, _ := json.Marshal(map[string]any{"data": map[string]any{"type": "devices", "id": id,
+				"attributes": map[string]string{"name": name}}})
+			if b, c := call(tok, "PATCH", api+"/"+id, req); c != 200 {
+				bad++
+				fmt.Fprintf(os.Stderr, "FAILED %s: HTTP %d %s\n", udid, c, b)
+			} else {
+				fmt.Printf("renamed %s → %s\n", udid, name)
+			}
+		}
+		if bad > 0 {
+			os.Exit(1)
 		}
 		return
 	}
