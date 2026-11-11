@@ -47,6 +47,28 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
  STUDIO  great-lakes  (chord-coach server :8766; no DDI for 0x8160)
 ```
 
+### What `taildrop.sh` does, step by step
+
+```
+ taildrop.sh <device|-> <proj> <scheme> <bundle> [xcodebuild args]
+   │
+   ├─ 1 prep     park team profiles >1 day old (unless they carry $UDID) → ~/pp-old
+   │             xcodegen generate (if project.yml) · rm previous Debug-iphoneos
+   ├─ 2 build    xcodebuild Debug, generic/platform=iOS, -allowProvisioningUpdates
+   │             ASC key auth · CURRENT_PROJECT_VERSION=yyyymmddHHMM
+   │             fail → print error: lines, exit 1   (log: build-<slug>.log)
+   ├─ 3 verify   pick the .app whose CFBundleIdentifier = <bundle>
+   │             $UDID set but missing from embedded.mobileprovision → exit 1
+   ├─ 4 package  Payload/<app> → zip → app.ipa
+   │             manifest.plist (itms-services) · icon.png (AppIcon or letter tile)
+   │             meta.json · index.html → ../   into caches/taildrop-ota/<slug>/
+   ├─ 5 serve    start ota_server.py on :8799 if it isn't answering
+   │             tailscale serve :8443/ota → 127.0.0.1:8799
+   │             /ota/, manifest.plist, icon.png must all return 200
+   └─ 6 send     device "-" → print link, exit
+                 else tailscale file cp "Installs link.txt" → <device>
+```
+
 Reinstalls replace the app in place (same bundle id + team keep data and sign-in); every build gets a fresh `CFBundleVersion` so installs are distinguishable. Full runbook, known apps and gotchas: [`taildrop/SKILL.md`](taildrop/SKILL.md).
 
 Requirements on the cluster: Xcode, `xcodegen`, ImageMagick, Tailscale CLI on the phones' tailnet, and an App Store Connect API key in `~/.appstoreconnect/` (`issuer_id` + `private_keys/AuthKey_*.p8`).
