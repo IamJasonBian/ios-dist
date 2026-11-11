@@ -45,7 +45,8 @@ type Meta struct {
 	Build   string  `json:"build"`
 	Bundle  string  `json:"bundle"`
 	Built   float64 `json:"built"`
-	Ack     int     `json:"ack"` // 1 = app GETs /api/ack?bundle=&build=&vid= on every launch
+	Sign    string  `json:"sign"` // debugging | release-testing; see signLabel
+	Ack     int     `json:"ack"`  // 1 = app GETs /api/ack?bundle=&build=&vid= on every launch
 }
 
 // Attempt is one Install tap, tracked from tap to its final state.
@@ -238,6 +239,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.page(w)
 	case r.URL.Path == "/api/ack": // app launch, every launch
 		s.ack(w, q.Get("bundle"), q.Get("build"), q.Get("vid"))
+	case r.URL.Path == "/api/deploys":
+		s.deploysAPI(w, r)
 	case r.URL.Path == "/api/status":
 		s.status(w)
 	case r.URL.Path == "/register.mobileconfig":
@@ -296,9 +299,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ack records a launch. A phone's first ACK of the current build resolves that build's
 // newest open attempt to installed; every ACK, any build, updates acks.json.
 func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
+	// Several entries can share a bundle (dev + Ad Hoc); prefer the one carrying this build.
 	var m Meta
-	for _, a := range s.apps() {
-		if a.Bundle == bundle {
+	for _, a := range s.apps() { // newest first
+		if a.Bundle == bundle && (m.Slug == "" || (a.Build == build && m.Build != build)) {
 			m = a
 		}
 	}
@@ -490,6 +494,7 @@ func (s *server) ipa(w http.ResponseWriter, r *http.Request, slug, id string) {
 
 var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
 	"when": func(t float64) string { return time.Unix(int64(t), 0).Format("Jan 2 15:04") },
+	"sign": signLabel,
 }).Parse(`<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Installs</title>
 <style>
@@ -507,13 +512,17 @@ h1{font-size:28px;margin:0 0 16px}
 #st.run{display:block;background:var(--line)}
 #dev{padding:12px 16px;border-bottom:1px solid var(--line);display:none}
 .reg{display:block;margin:20px 0 0;color:var(--mut);font-size:14px}
+.dep{display:block;color:var(--mut);font-size:13px;padding:3px 0}
 </style></head><body><div id=st></div><div id=dev></div>
 <main><h1>Installs</h1>
 {{range .Apps}}<section class=app><img src="{{.Slug}}/icon.png" alt=""><div><b>{{.Name}}</b>
-<small>{{.Version}} ({{.Build}}) · built {{when .Built}}</small>
+<small>{{.Version}} ({{.Build}}) · {{sign .Sign}} · built {{when .Built}}</small>
 <small>{{with index $.Seen .Slug}}last launch {{when .last}} · build {{.build}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch ACK in this app{{end}}{{end}}</small></div>
 <a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
 {{else}}<p>No apps yet.</p>{{end}}
+{{with .Deploys}}<h2 style="font-size:18px;margin:28px 0 8px">Recent deploys</h2>
+{{range .}}<small class=dep>{{when .T}} · {{.Name}} {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{.Git}} · {{.By}}</small>
+{{end}}{{end}}
 <a class=reg href="register.mobileconfig">New iPhone, or the icon says “Unable to Install”? Register this iPhone →</a>
 <small class=reg>Downloads a profile: Settings → Profile Downloaded → Install. It only sends this iPhone’s UDID; then the build computer adds it and rebuilds.</small></main>
 <script>
@@ -553,7 +562,7 @@ devPoll();setInterval(devPoll,15000);
 
 func (s *server) page(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	data := map[string]any{"Apps": s.apps(), "Seen": s.lastSeen(), "Codes": codeText(), "Base": s.base}
+	data := map[string]any{"Apps": s.apps(), "Seen": s.lastSeen(), "Codes": codeText(), "Base": s.base, "Deploys": s.deploys(10)}
 	if err := pageTmpl.Execute(w, data); err != nil {
 		log.Print(err)
 	}

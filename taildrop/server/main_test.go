@@ -290,3 +290,30 @@ func TestEnrollRejectsBodyWithoutUDID(t *testing.T) {
 		t.Fatalf("status %d, %d devices", w.Code, len(f.s.devices))
 	}
 }
+
+func TestAckPicksEntryWithMatchingBuild(t *testing.T) {
+	f := newFixture(t)
+	os.MkdirAll(filepath.Join(f.s.root, "demo-adhoc"), 0o755)
+	os.WriteFile(filepath.Join(f.s.root, "demo-adhoc", "app.ipa"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(f.s.root, "demo-adhoc", "meta.json"),
+		[]byte(`{"slug":"demo-adhoc","name":"Demo","version":"1","build":"B5","bundle":"x.demo","built":9,"sign":"release-testing","ack":1}`), 0o644)
+	f.get("/demo/app.ipa?a=devatt") // dev entry, build B2, newer-built adhoc entry exists
+	f.get("/api/ack?bundle=x.demo&build=B2&vid=V1")
+	if got := f.code("devatt"); got != "installed" {
+		t.Fatalf("ack for dev build B2 gave %q, want installed", got)
+	}
+}
+
+func TestDeploysNewestFirstSkipsTorn(t *testing.T) {
+	f := newFixture(t)
+	os.WriteFile(filepath.Join(f.s.root, "deploys.jsonl"), []byte(
+		`{"t":1,"slug":"demo","build":"B1","sign":"debugging"}`+"\n"+`{"t":2,"slug":"de`+"\n"+
+			`{"t":3,"slug":"demo-adhoc","build":"B2","sign":"release-testing"}`+"\n"), 0o644)
+	d := f.s.deploys(10)
+	if len(d) != 2 || d[0].Build != "B2" || d[1].Build != "B1" {
+		t.Fatalf("deploys = %+v", d)
+	}
+	if body := f.get("/").Body.String(); !strings.Contains(body, "Recent deploys") || !strings.Contains(body, "Ad Hoc") {
+		t.Fatal("page lacks the deploy list")
+	}
+}
