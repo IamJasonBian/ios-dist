@@ -6,6 +6,7 @@
 #   device "-" → build + serve only, no Taildrop
 #   UDID=<udid> env → fail if the signed profile lacks that phone
 #   ACK=1 env      → app has client/TaildropAck.swift (GET /ota/api/ack on every launch; enables installed/failed.launch)
+#   SIGN=release-testing env → Release archive + Ad Hoc export (Apple Distribution) instead of a Debug build
 #   Phones registered on the install page (state pending) are added to the team first (ascreg),
 #   and the build must include every pending/registered phone. register-watch.sh marks them ready.
 set -euo pipefail
@@ -41,7 +42,7 @@ for row in $NEED; do
 done
 (( $#WANT )) && echo "  build must include: $WANT" || echo "  none"
 
-echo "▶ build $SCHEME ($BUNDLE)"
+echo "▶ build $SCHEME ($BUNDLE, ${SIGN:-debugging})"
 # Xcode reuses cached team profiles even when they predate newly registered phones; park them
 # so -allowProvisioningUpdates fetches one carrying every registered device.
 PP=~/Library/Developer/Xcode/UserData/Provisioning\ Profiles; mkdir -p ~/pp-old
@@ -54,16 +55,39 @@ for f in "$PP"/*.mobileprovision(N); do
 done
 cd "$PROJ"
 [[ -f project.yml ]] && command -v xcodegen >/dev/null && xcodegen generate -q
-rm -rf build/taildrop/Build/Products/Debug-iphoneos   # never ship a previous run's .app
+rm -rf build/taildrop/Build/Products/Debug-iphoneos build/taildrop/export   # never ship a previous run's .app
 LOG=$ROOT/build-$SLUG.log; mkdir -p $ROOT
-if ! xcodebuild -scheme "$SCHEME" -configuration Debug -destination generic/platform=iOS \
-  -allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$KID" -authenticationKeyIssuerID "$ISSUER" \
-  -derivedDataPath build/taildrop -quiet build CURRENT_PROJECT_VERSION=$BUILD "${EXTRA[@]}" >$LOG 2>&1; then
-  grep -E 'error:' $LOG | head -20; echo "BUILD FAILED — full log $LOG"; exit 1
+AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$KID" -authenticationKeyIssuerID "$ISSUER")
+fail() { grep -E 'error:' $LOG | head -20; echo "BUILD FAILED — full log $LOG"; exit 1; }
+if [[ ${SIGN:-} == release-testing ]]; then
+  # Ad Hoc: archive (dev-signed), then export re-signs with Apple Distribution + an ad hoc profile.
+  # teamID is left out: exportArchive defaults to the archive's team. TAILDROP keeps TaildropAck in Release.
+  XCA=build/taildrop/$SLUG.xcarchive; rm -rf $XCA
+  xcodebuild -scheme "$SCHEME" -configuration Release -destination generic/platform=iOS "${AUTH[@]}" \
+    -derivedDataPath build/taildrop -archivePath $XCA -quiet archive CURRENT_PROJECT_VERSION=$BUILD \
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) TAILDROP' "${EXTRA[@]}" >$LOG 2>&1 || fail
+  cat >build/taildrop/ExportOptions.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>method</key><string>release-testing</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>thinning</key><string>&lt;none&gt;</string>
+</dict></plist>
+EOF
+  xcodebuild -exportArchive -archivePath $XCA -exportPath build/taildrop/export \
+    -exportOptionsPlist build/taildrop/ExportOptions.plist "${AUTH[@]}" >>$LOG 2>&1 || fail
+  IPA=(build/taildrop/export/*.ipa(N)); (( $#IPA == 1 )) || { echo "export made ${#IPA} .ipa files — full log $LOG"; exit 1; }
+  rm -rf build/taildrop/unzipped && unzip -q $IPA[1] -d build/taildrop/unzipped
+  APPS=(build/taildrop/unzipped/Payload/*.app(N))
+else
+  xcodebuild -scheme "$SCHEME" -configuration Debug -destination generic/platform=iOS "${AUTH[@]}" \
+    -derivedDataPath build/taildrop -quiet build CURRENT_PROJECT_VERSION=$BUILD "${EXTRA[@]}" >$LOG 2>&1 || fail
+  IPA=() APPS=(build/taildrop/Build/Products/Debug-iphoneos/*.app(N))
 fi
 
 APP=""
-for a in build/taildrop/Build/Products/Debug-iphoneos/*.app; do
+for a in $APPS; do
   [[ $(plutil -extract CFBundleIdentifier raw "$a/Info.plist") == "$BUNDLE" ]] && APP=$a
 done
 [[ -n $APP ]] || { echo "no built .app with bundle id $BUNDLE"; exit 1; }
@@ -73,8 +97,9 @@ echo "  $APP — profile devices: $(echo "$PROFILE" | grep -oE '[0-9A-F]{8}-[0-9
 
 echo "▶ package"
 OUT=$ROOT/$SLUG; rm -rf $OUT; mkdir -p $OUT/pkg/Payload
-cp -R "$APP" $OUT/pkg/Payload/
-(cd $OUT/pkg && zip -qry ../app.ipa Payload); rm -rf $OUT/pkg
+if (( $#IPA )); then cp $IPA[1] $OUT/app.ipa
+else cp -R "$APP" $OUT/pkg/Payload/; (cd $OUT/pkg && zip -qry ../app.ipa Payload)
+fi; rm -rf $OUT/pkg
 NAME=$(plutil -extract CFBundleDisplayName raw "$APP/Info.plist" 2>/dev/null || plutil -extract CFBundleName raw "$APP/Info.plist")
 VER=$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")
 ICONS=("$APP"/AppIcon60x60@2x.png(N) "$APP"/AppIcon*.png(N))

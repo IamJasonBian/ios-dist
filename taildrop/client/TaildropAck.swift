@@ -1,9 +1,9 @@
 // TaildropAck: tells the taildrop install server this app launched. Drop this file into a
-// dev app and build it with `ACK=1 taildrop.sh …`. Debug builds only; App Store builds skip it.
+// dev app and build it with `ACK=1 taildrop.sh …`. Debug and TAILDROP (SIGN=release-testing) builds only; App Store builds skip it.
 //
 // Sends GET <server>/api/ack?bundle=&build=&vid= on launch and on every return to the
 // foreground. A failed send is simply retried on the next foreground.
-#if DEBUG
+#if DEBUG || TAILDROP
 import UIKit
 
 @MainActor
