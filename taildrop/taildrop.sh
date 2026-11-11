@@ -65,6 +65,9 @@ python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","versi
   $SLUG "$NAME" $VER $BUILD $BUNDLE ${ACK:-0} > $OUT/meta.json
 
 echo "▶ publish → $SERVER:$REMOTE/$SLUG (server/main.go, behind tailscale serve :$HTTPS/ota)"
+# Self-heal: start the server's restart loop and the tailnet route if either is missing.
+ssh $SERVER 'pgrep -f "server -root" >/dev/null || (cd ~/taildrop && nohup ./run.sh >>server.log 2>&1 </dev/null &)
+  /usr/local/bin/tailscale --socket=/var/run/tailscaled.socket serve --bg --https='$HTTPS' --set-path /ota http://127.0.0.1:8799 >/dev/null'
 # Stage in <slug>.new, then swap dirs, so the page never sees a new ipa with an old meta.json.
 ssh $SERVER "rm -rf $REMOTE/$SLUG.new && mkdir -p $REMOTE/$SLUG.new"
 rsync -a $OUT/app.ipa $OUT/icon.png $OUT/meta.json $SERVER:$REMOTE/$SLUG.new/

@@ -164,3 +164,84 @@ func TestOldLinkRedirectsToPage(t *testing.T) {
 		t.Fatalf("redirect %d to %q, want 302 to https://h/ota/", w.Code, loc)
 	}
 }
+
+func TestLateDownloadRecoversFromFailed(t *testing.T) {
+	f := newFixture(t)
+	f.get("/demo/manifest.plist?a=late01")
+	f.clk = f.clk.Add(downloadIdle + time.Second) // user sat on the iOS install prompt
+	f.s.sweep()
+	f.get("/demo/app.ipa?a=late01")
+	if got := f.code("late01"); got != "downloaded" {
+		t.Fatalf("got %q, want downloaded", got)
+	}
+}
+
+func TestRelaunchOnOtherPhoneDoesNotResolve(t *testing.T) {
+	f := newFixture(t)
+	f.get("/api/ack?bundle=x.demo&build=B2&vid=PHONEA") // A already runs B2
+	f.get("/demo/app.ipa?a=phoneb")                     // B downloads B2
+	f.get("/api/ack?bundle=x.demo&build=B2&vid=PHONEA") // A relaunches
+	if got := f.code("phoneb"); got != "downloaded" {
+		t.Fatalf("A's relaunch resolved B's attempt: %q", got)
+	}
+	f.get("/api/ack?bundle=x.demo&build=B2&vid=PHONEB")
+	if got := f.code("phoneb"); got != "installed" {
+		t.Fatalf("B's first launch gave %q, want installed", got)
+	}
+}
+
+func TestEmptyVidRejected(t *testing.T) {
+	f := newFixture(t)
+	if w := f.get("/api/ack?bundle=x.demo&build=B2&vid="); w.Code != 400 || len(f.s.seen) != 0 {
+		t.Fatalf("status %d, seen %d", w.Code, len(f.s.seen))
+	}
+}
+
+func TestSuffixAndMultiRangesNotCounted(t *testing.T) {
+	f := newFixture(t)
+	f.get("/demo/app.ipa?a=suffix", "Range", "bytes=-1048576") // whole file, but as a suffix
+	f.get("/demo/app.ipa?a=suffix", "Range", "bytes=0-10,20-1048575")
+	if got := f.s.attempts["suffix"]; got.Got != 0 || got.Code() != "installing" {
+		t.Fatalf("Got=%d code=%s, want 0/installing", got.Got, got.Code())
+	}
+}
+
+func TestStaleIfRangeCountsFromZero(t *testing.T) {
+	f := newFixture(t)
+	f.get("/demo/app.ipa?a=ifrng1", "Range", "bytes=500000-", "If-Range", `"OLDBUILD"`)
+	if got := f.code("ifrng1"); got != "downloaded" {
+		t.Fatalf("full 200 after stale If-Range gave %q, want downloaded", got)
+	}
+}
+
+func TestResumeAfterRestart(t *testing.T) {
+	f := newFixture(t)
+	f.get("/demo/app.ipa?a=resum1", "Range", "bytes=0-499999")
+	g := newFixture(t)
+	g.s.root = f.s.root
+	g.s.replay(bytes.NewReader(f.log.Bytes()))
+	g.get("/demo/app.ipa?a=resum1", "Range", "bytes=500000-")
+	if got := g.code("resum1"); got != "downloaded" {
+		t.Fatalf("resume after restart gave %q, want downloaded", got)
+	}
+}
+
+func TestReplaySkipsTornLine(t *testing.T) {
+	f := newFixture(t)
+	logs := `{"t":1800000000,"attempt":"torn01","slug":"demo","build":"B2","state":"insta` + "\n" +
+		`{"v":1,"t":1800000000,"attempt":"after1","slug":"demo","build":"B2","state":"downloaded"}` + "\n"
+	f.s.replay(strings.NewReader(logs))
+	if a := f.s.attempts["after1"]; a == nil || a.State != "downloaded" {
+		t.Fatalf("line after a torn line was lost: %+v", a)
+	}
+}
+
+func TestRepublishMidDownloadConflicts(t *testing.T) {
+	f := newFixture(t)
+	f.get("/demo/manifest.plist?a=repub1") // attempt pinned to B2
+	os.WriteFile(filepath.Join(f.s.root, "demo", "meta.json"),
+		[]byte(`{"slug":"demo","name":"Demo","version":"1","build":"B3","bundle":"x.demo","built":2,"ack":1}`), 0o644)
+	if w := f.get("/demo/app.ipa?a=repub1"); w.Code != http.StatusConflict {
+		t.Fatalf("status %d, want 409", w.Code)
+	}
+}

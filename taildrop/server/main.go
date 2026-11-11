@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -53,6 +54,7 @@ type Attempt struct {
 	Ack                            bool
 	Created, Last                  time.Time
 	Got, Size                      int64 // contiguous bytes of app.ipa delivered from offset 0
+	Restored                       bool  // rebuilt by replay; Got was lost, so trust the first resume offset
 }
 
 // Code returns the banner code for the attempt's current state.
@@ -166,15 +168,16 @@ func (s *server) sweep() {
 // replay rebuilds recent attempts from events.jsonl so a restart keeps ACK matching and
 // deadlines. Restored attempts get a fresh Last, i.e. a full grace period.
 func (s *server) replay(r io.Reader) {
-	dec := json.NewDecoder(r)
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	now := s.now()
-	for {
+	for sc.Scan() {
 		var e struct {
 			T                                   float64
 			Attempt, Slug, Build, State, Reason string
 		}
-		if err := dec.Decode(&e); err != nil {
-			break
+		if json.Unmarshal(sc.Bytes(), &e) != nil {
+			continue // a torn line must not hide the lines after it
 		}
 		t := time.UnixMilli(int64(e.T * 1000))
 		if e.Attempt == "" || now.Sub(t) > keepAttempts {
@@ -183,38 +186,45 @@ func (s *server) replay(r io.Reader) {
 		a, ok := s.attempts[e.Attempt]
 		if !ok {
 			m, _ := s.meta(e.Slug)
-			a = &Attempt{ID: e.Attempt, Slug: e.Slug, Build: e.Build, Ack: m.Ack == 1, Created: t}
+			a = &Attempt{ID: e.Attempt, Slug: e.Slug, Build: e.Build, Ack: m.Ack == 1, Created: t, Restored: true}
 			s.attempts[e.Attempt] = a
 		}
 		a.State, a.Reason, a.Last = e.State, e.Reason, now
 	}
 }
 
-// progressWriter reports each chunk of an app.ipa body as it is sent.
+// progressWriter reports each chunk of an app.ipa body, with the response status, as it is sent.
 type progressWriter struct {
 	http.ResponseWriter
-	onWrite func(n int)
+	status  int
+	onWrite func(status, n int)
+}
+
+func (w *progressWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *progressWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
 	n, err := w.ResponseWriter.Write(b)
 	if n > 0 {
-		w.onWrite(n)
+		w.onWrite(w.status, n)
 	}
 	return n, err
 }
 
-// rangeStart returns the first byte offset of a single "bytes=N-…" Range header, else 0.
-func rangeStart(h string) int64 {
+// singleRangeStart parses a single "bytes=N-" or "bytes=N-M" Range header. Suffix ranges
+// ("bytes=-N") and multi-ranges report ok=false: their bytes are not a known offset.
+func singleRangeStart(h string) (int64, bool) {
 	spec, ok := strings.CutPrefix(h, "bytes=")
 	if !ok || strings.Contains(spec, ",") {
-		return 0
+		return 0, false
 	}
 	n, err := strconv.ParseInt(strings.SplitN(spec, "-", 2)[0], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
+	return n, err == nil
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -266,8 +276,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ack records a launch. The first ACK of the current build resolves that build's newest
-// open attempt to installed; every ACK, any build, updates acks.json.
+// ack records a launch. A phone's first ACK of the current build resolves that build's
+// newest open attempt to installed; every ACK, any build, updates acks.json.
 func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 	var m Meta
 	for _, a := range s.apps() {
@@ -279,6 +289,10 @@ func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 		http.Error(w, "unknown app", 404)
 		return
 	}
+	if vid == "" { // the app retries on its next foreground once iOS has an identifierForVendor
+		http.Error(w, "vid required", 400)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := unix(s.now())
@@ -288,10 +302,15 @@ func (s *server) ack(w http.ResponseWriter, bundle, build, vid string) {
 		sn = &Seen{Slug: m.Slug, Vid: vid, First: now}
 		s.seen[key] = sn
 	}
+	firstLaunch := sn.Build != build // this phone's first launch of this build
 	sn.Build, sn.Last, sn.Count = build, now, sn.Count+1
 	s.saveSeen()
 	if build != m.Build {
 		fmt.Fprint(w, "ok (stale build, latest "+m.Build+")")
+		return
+	}
+	if !firstLaunch { // a relaunch on a phone that already has this build installs nothing
+		fmt.Fprint(w, "ok")
 		return
 	}
 	var hit *Attempt
@@ -400,6 +419,7 @@ func (s *server) ipa(w http.ResponseWriter, r *http.Request, slug, id string) {
 	defer f.Close()
 	st, _ := f.Stat()
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("ETag", `"`+m.Build+`"`) // a resume across a republish gets the whole new file
 	if !idRe.MatchString(id) || r.Method == http.MethodHead {
 		http.ServeContent(w, r, "app.ipa", st.ModTime(), f)
 		return
@@ -407,19 +427,44 @@ func (s *server) ipa(w http.ResponseWriter, r *http.Request, slug, id string) {
 	s.mu.Lock()
 	a := s.attempt(id, m)
 	a.Size = st.Size()
+	if a.Build != m.Build { // republished since this attempt's manifest: don't mix builds
+		s.set(a, "failed", "download")
+		s.mu.Unlock()
+		http.Error(w, "app was republished; tap Install again", http.StatusConflict)
+		return
+	}
 	s.mu.Unlock()
 	// Bytes count toward Got only while they extend the contiguous prefix from offset 0, so
 	// two broken downloads never add up to a "complete" one; each chunk also resets Last.
-	off := rangeStart(r.Header.Get("Range"))
-	pw := &progressWriter{ResponseWriter: w, onWrite: func(n int) {
+	// The offset comes from the actual response: 200 = from 0, 206 = the single range start;
+	// anything else (multipart) is not counted.
+	start, single := singleRangeStart(r.Header.Get("Range"))
+	var off int64
+	counted, decided := false, false
+	pw := &progressWriter{ResponseWriter: w, onWrite: func(status, n int) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		a.Last = s.now()
-		if off <= a.Got {
-			a.Got = max(a.Got, off+int64(n))
+		if !decided {
+			decided = true
+			switch {
+			case status == http.StatusOK:
+				off, counted = 0, true
+			case status == http.StatusPartialContent && single:
+				off, counted = start, true
+				if a.Restored && a.Got == 0 {
+					a.Got = start
+				}
+			}
 		}
-		off += int64(n)
-		if a.State == "installing" && a.Got >= a.Size {
+		if counted {
+			if off <= a.Got {
+				a.Got = max(a.Got, off+int64(n))
+			}
+			off += int64(n)
+		}
+		// failed.download can still complete: the user may sit on the iOS prompt past the deadline.
+		if (a.State == "installing" || a.Code() == "failed.download") && a.Got >= a.Size {
 			s.set(a, "downloaded", "")
 		}
 	}}
@@ -459,7 +504,7 @@ function show(code){
 }
 document.querySelectorAll('a[data-slug]').forEach(a=>a.addEventListener('click',()=>{
   const id=Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>b.toString(16).padStart(2,'0')).join('');
-  cur={id,name:a.dataset.name};
+  cur={id,name:a.dataset.name,t:Date.now()};
   fetch('api/start/'+a.dataset.slug+'?a='+id,{keepalive:true}).catch(()=>{});
   a.href='itms-services://?action=download-manifest&url='+encodeURIComponent(BASE+'/'+a.dataset.slug+'/manifest.plist?a='+id);
   show('installing');
@@ -468,7 +513,7 @@ async function poll(){
   if(!cur)return;
   const r=await fetch('api/attempt/'+cur.id).catch(()=>null);
   if(!r){show('failed.unreachable');return}                      // page-only: the server never heard it
-  if(r.status===404){show('failed.download');cur=null;return}    // server never saw the tap or manifest
+  if(r.status===404){if(Date.now()-cur.t<15000)return;show('failed.download');cur=null;return}  // never saw tap or manifest
   const j=await r.json();show(j.code);if(j.final)cur=null;
 }
 setInterval(poll,3000);document.addEventListener('visibilitychange',poll);

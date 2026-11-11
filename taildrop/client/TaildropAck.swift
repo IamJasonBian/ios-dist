@@ -20,12 +20,14 @@ enum TaildropAck {
     }
 
     static func send() {
+        // identifierForVendor can be nil just after a device restart; try again next foreground.
+        guard let vid = UIDevice.current.identifierForVendor?.uuidString else { return }
         let info = Bundle.main.infoDictionary ?? [:]
         var c = URLComponents(url: server, resolvingAgainstBaseURL: false)!
         c.queryItems = [
             URLQueryItem(name: "bundle", value: Bundle.main.bundleIdentifier),
             URLQueryItem(name: "build", value: info["CFBundleVersion"] as? String),
-            URLQueryItem(name: "vid", value: UIDevice.current.identifierForVendor?.uuidString),
+            URLQueryItem(name: "vid", value: vid),
         ]
         var req = URLRequest(url: c.url!, timeoutInterval: 10)
         req.cachePolicy = .reloadIgnoringLocalCacheData

@@ -23,13 +23,13 @@ var Codes = []Code{
 	{
 		Name:    "downloaded",
 		Legacy:  []string{"PROGRESS.downloaded", "PROGRESS.awaitingLaunch"},
-		Trigger: "every byte of app.ipa sent; final for apps without a launch ACK",
+		Trigger: "every byte of app.ipa sent (also from failed.download, if the user sat on the iOS prompt); final for apps without a launch ACK",
 		Text:    "{n} downloaded ✓ — open it from the home screen. Icon says “Unable to Install”? This iPhone isn’t in the signing profile (or its iOS is too old): register it, rebuild, resend.",
 	},
 	{
 		Name:    "installed",
 		Legacy:  []string{"PROGRESS.launched"},
-		Trigger: "app sent GET /api/ack?bundle=&build=<this build>&vid= (sent on every launch)",
+		Trigger: "a phone's first GET /api/ack?bundle=&build=<this build>&vid= (apps ACK every launch; relaunches only update acks.json)",
 		Text:    "{n} installed and opened ✓",
 	},
 
@@ -49,7 +49,7 @@ var Codes = []Code{
 	{
 		Name:    "failed.unreachable",
 		Legacy:  []string{"ERRORS.unreachable"},
-		Trigger: "page only: the poll to the server failed, so the server never logs it. A 404 for the attempt (server never saw the tap) shows failed.download",
+		Trigger: "page only: the poll to the server failed, so the server never logs it. A 404 for the attempt 15 s after the tap (server never saw it) shows failed.download",
 		Text:    "Install server unreachable — is Tailscale on?",
 	},
 }
