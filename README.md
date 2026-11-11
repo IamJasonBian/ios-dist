@@ -1,3 +1,52 @@
 # ios-dist
 
 Distribution tooling for our iOS apps.
+
+## taildrop — over-the-air installs over the tailnet
+
+`taildrop/taildrop.sh` builds a dev-signed app on the cluster, publishes it to one tailnet-only install page, and Taildrops that page's link to a phone. No cable, no devicectl, no disk image — this is how apps reach phones whose chip Xcode has no DDI for (iPhone 18 Pro / 0x8160 on Xcode 27.2).
+
+```sh
+taildrop/taildrop.sh great-lakes-leader ~/Desktop/apollo/alpha/postings-ios Postings com.trypostings.app -scmProvider system
+taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
+```
+
+```
+ CLUSTER  queensborough-2  (tailnet tail70b2c1, `tailscale switch 28bd`)
+ ┌──────────────────────────────────────────────────────────────────┐
+ │ taildrop.sh <device> <proj> <scheme> <bundle>                    │
+ │   xcodebuild (ASC key, build=yyyymmddHHMM; fail → exit, no stale)│
+ │        │                                                         │
+ │        ▼                                                         │
+ │ ~/Library/Caches/taildrop-ota/<slug>/                            │
+ │   app.ipa · manifest.plist · icon.png · meta.json                │
+ │        │                                                         │
+ │        ▼                                                         │
+ │ ota_server.py  127.0.0.1:8799                                    │
+ │   /            all-installs page + status banner JS              │
+ │   /api/events  manifest / ipa / launch events ← events.jsonl     │
+ │        ▲                                                         │
+ │ tailscale serve  :8443/ota   (HTTPS, tailnet-only)               │
+ └────────┬───────────────────────────────────┬─────────────────────┘
+          │ 1. tailscale file cp              │ 3. GET manifest + app.ipa
+          │    "Installs link.txt"            │    (logged as events)
+          ▼                                   │
+ PHONE  great-lakes-leader (iPhone 15 Pro)    │
+ ┌────────────────────────────────────────────┴─────────────────────┐
+ │ 2. Files → Tailscale → link → Safari: /ota/  → tap Install       │
+ │ 4. banner polls /api/events every 3s:                            │
+ │      red   server unreachable · no download in 45s               │
+ │      green app.ipa downloaded                                    │
+ │ 5. iOS installs/replaces (same bundle + team → data kept)        │
+ │    signature fail → iOS "Unable to Install" (native)             │
+ │    [opt-in] app GETs /api/launch/<slug> → "opened ✓"             │
+ │ 6. app runtime → backend                                         │
+ └──────────────┬───────────────────────────────────────────────────┘
+                │ Chord Coach: http://100.117.72.33:8766
+                ▼            Postings: app.trypostings.com
+ STUDIO  great-lakes  (chord-coach server :8766; no DDI for 0x8160)
+```
+
+Reinstalls replace the app in place (same bundle id + team keep data and sign-in); every build gets a fresh `CFBundleVersion` so installs are distinguishable. Full runbook, known apps and gotchas: [`taildrop/SKILL.md`](taildrop/SKILL.md).
+
+Requirements on the cluster: Xcode, `xcodegen`, ImageMagick, Tailscale CLI on the phones' tailnet, and an App Store Connect API key in `~/.appstoreconnect/` (`issuer_id` + `private_keys/AuthKey_*.p8`).
