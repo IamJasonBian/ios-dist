@@ -69,7 +69,7 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
                  else tailscale file cp "Installs link.txt" → <device>
 ```
 
-### Network (planned: server on great-lakes)
+### Network
 
 ```
                          tailnet tail70b2c1  (WireGuard, tailnet-only — no Funnel)
