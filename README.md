@@ -69,6 +69,34 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
                  else tailscale file cp "Installs link.txt" → <device>
 ```
 
+### Network (planned: server on great-lakes)
+
+```
+                         tailnet tail70b2c1  (WireGuard, tailnet-only — no Funnel)
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │  LAPTOP  queensborough-2                     CLUSTER  great-lakes  100.117.72.33  │
+ │  ┌──────────────────────────┐                ┌──────────────────────────────────┐ │
+ │  │ taildrop.sh              │   rsync/ssh    │ taildrop server (Go)             │ │
+ │  │  xcodebuild + sign       │ ─────────────► │  tailscale serve :8443/ota       │ │
+ │  │  package ipa + meta      │  app.ipa,      │  /ota/            install page   │ │
+ │  │                          │  meta.json     │  /ota/<slug>/manifest.plist?a=   │ │
+ │  │                          │                │  /ota/<slug>/app.ipa?a=          │ │
+ │  │                          │                │  /ota/api/ack/<slug>  launch ACK │ │
+ │  │                          │                │  deadlines → events.jsonl        │ │
+ │  └────────────┬─────────────┘                └───────┬───────────────▲──────────┘ │
+ │               │ 1. tailscale file cp                 │ 3. manifest   │ 4. launch  │
+ │               │    "Installs link.txt"               │    + app.ipa  │    ACK     │
+ │               ▼                                      ▼    (HTTPS)    │            │
+ │  IPHONE  great-lakes-leader / queensborough-leader ──────────────────┘            │
+ │  ┌──────────────────────────────────────────────────────────────┐                 │
+ │  │ 2. Files → Tailscale → link → Safari → Install (mints a=ID)  │                 │
+ │  │    page polls /ota/api/attempt/<id>                          │                 │
+ │  │ iOS installd ──► Apple (cert/trust check, invisible to us)   │                 │
+ │  │ 5. app runtime ──► its backend                               │                 │
+ │  └──────────────────────────────────────────────────────────────┘                 │
+ └───────────────────────────────────────────────────────────────────────────────────┘
+```
+
 Reinstalls replace the app in place (same bundle id + team keep data and sign-in); every build gets a fresh `CFBundleVersion` so installs are distinguishable. Full runbook, known apps and gotchas: [`taildrop/SKILL.md`](taildrop/SKILL.md).
 
 Requirements on the cluster: Xcode, `xcodegen`, ImageMagick, Tailscale CLI on the phones' tailnet, and an App Store Connect API key in `~/.appstoreconnect/` (`issuer_id` + `private_keys/AuthKey_*.p8`).
