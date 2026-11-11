@@ -6,6 +6,8 @@
 #   device "-" → build + serve only, no Taildrop
 #   UDID=<udid> env → fail if the signed profile lacks that phone
 #   ACK=1 env      → app has client/TaildropAck.swift (GET /ota/api/ack on every launch; enables installed/failed.launch)
+#   Phones registered on the install page (state pending) are added to the team first (ascreg),
+#   and the build must include every pending/registered phone. register-watch.sh marks them ready.
 set -euo pipefail
 
 DEV=$1 PROJ=$2 SCHEME=$3 BUNDLE=$4; shift 4
@@ -21,6 +23,24 @@ ISSUER=$(cat ~/.appstoreconnect/issuer_id)
 KEY=$(ls ~/.appstoreconnect/private_keys/AuthKey_*.p8 | head -1)
 KID=${${KEY:t:r}#AuthKey_}
 
+echo "▶ register phones queued on the install page"
+DEVJSON=$(curl -sf "${ALL}api/devices") || { echo "can't read ${ALL}api/devices — is the server up?"; exit 1; }
+NEED=(${(f)"$(print -r -- $DEVJSON | python3 -c '
+import json,sys
+for d in json.load(sys.stdin):
+    if d["state"] in ("pending","registered"): print(d["udid"], d["state"], d.get("name") or "")
+')"})
+WANT=(${UDID:-})
+for row in $NEED; do
+  u=${row%% *} st=${${row#* }%% *} name=${row#* * }
+  if [[ $st == pending ]]; then
+    (cd ${0:A:h}/ascreg && go run . "$u=${name:-taildrop}") || { echo "could not register $u"; exit 1; }
+    curl -sf "${ALL}api/devices/$u?state=registered" >/dev/null
+  fi
+  WANT+=($u)
+done
+(( $#WANT )) && echo "  build must include: $WANT" || echo "  none"
+
 echo "▶ build $SCHEME ($BUNDLE)"
 # Xcode reuses cached team profiles even when they predate newly registered phones; park them
 # so -allowProvisioningUpdates fetches one carrying every registered device.
@@ -28,8 +48,8 @@ PP=~/Library/Developer/Xcode/UserData/Provisioning\ Profiles; mkdir -p ~/pp-old
 for f in "$PP"/*.mobileprovision(N); do
   p=$(security cms -D -i "$f" 2>/dev/null) || continue
   [[ $p == *"Profile: $BUNDLE<"* || $p == *"Profile: *<"* ]] || continue
-  [[ -n ${UDID:-} && $p == *$UDID* ]] && continue
-  (( $(date +%s) - $(stat -f %m "$f") < 86400 )) && continue   # fresh (<1 day) profiles stay
+  missing=0; for u in $WANT; do [[ $p == *$u* ]] || missing=1; done
+  (( ! missing && $(date +%s) - $(stat -f %m "$f") < 86400 )) && continue   # fresh + complete profiles stay
   mv "$f" ~/pp-old/
 done
 cd "$PROJ"
@@ -48,7 +68,7 @@ for a in build/taildrop/Build/Products/Debug-iphoneos/*.app; do
 done
 [[ -n $APP ]] || { echo "no built .app with bundle id $BUNDLE"; exit 1; }
 PROFILE=$(security cms -D -i "$APP/embedded.mobileprovision")
-if [[ -n ${UDID:-} && $PROFILE != *$UDID* ]]; then echo "profile lacks $UDID — register the phone first"; exit 1; fi
+for u in $WANT; do [[ $PROFILE == *$u* ]] || { echo "profile lacks $u — registered too recently for Apple? rerun in a minute"; exit 1; }; done
 echo "  $APP — profile devices: $(echo "$PROFILE" | grep -oE '[0-9A-F]{8}-[0-9A-F]{16}' | tr '\n' ' ')"
 
 echo "▶ package"
@@ -66,12 +86,12 @@ python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","versi
 
 echo "▶ publish → $SERVER:$REMOTE/$SLUG (server/main.go, behind tailscale serve :$HTTPS/ota)"
 # Self-heal: start the server's restart loop and the tailnet route if either is missing.
-ssh $SERVER 'pgrep -f "server -root" >/dev/null || (cd ~/taildrop && nohup ./run.sh >>server.log 2>&1 </dev/null &)
+ssh -n $SERVER 'pgrep -f "server -root" >/dev/null || (cd ~/taildrop && nohup ./run.sh >>server.log 2>&1 </dev/null &)
   /usr/local/bin/tailscale --socket=/var/run/tailscaled.socket serve --bg --https='$HTTPS' --set-path /ota http://127.0.0.1:8799 >/dev/null'
 # Stage in <slug>.new, then swap dirs, so the page never sees a new ipa with an old meta.json.
-ssh $SERVER "rm -rf $REMOTE/$SLUG.new && mkdir -p $REMOTE/$SLUG.new"
+ssh -n $SERVER "rm -rf $REMOTE/$SLUG.new && mkdir -p $REMOTE/$SLUG.new"
 rsync -a $OUT/app.ipa $OUT/icon.png $OUT/meta.json $SERVER:$REMOTE/$SLUG.new/
-ssh $SERVER "cd $REMOTE && rm -rf $SLUG.old && { [ ! -d $SLUG ] || mv $SLUG $SLUG.old; } && mv $SLUG.new $SLUG && rm -rf $SLUG.old"
+ssh -n $SERVER "cd $REMOTE && rm -rf $SLUG.old && { [ ! -d $SLUG ] || mv $SLUG $SLUG.old; } && mv $SLUG.new $SLUG && rm -rf $SLUG.old"
 for u in $ALL $BASE/icon.png $BASE/manifest.plist; do   # no ?a= → health check, no attempt logged
   code=$(curl -s -o /dev/null -w '%{http_code}' "$u")
   echo "  ${u#https://$HOST:$HTTPS} $code"; [[ $code == 200 ]] || { echo "link not serving — is the server up on $SERVER?"; exit 1; }

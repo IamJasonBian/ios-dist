@@ -62,3 +62,11 @@ func codeText() map[string]string {
 	}
 	return m
 }
+
+// DeviceStates are a new phone's registration states (on-site registration, devices.go),
+// in order, with the text the page shows on that phone. Separate from install Codes.
+var DeviceStates = map[string]string{
+	"pending":    "This iPhone is queued for registration. The build computer will add it to the team and rebuild — keep this page open or check back in a few minutes.",
+	"registered": "This iPhone is on the team; a build that includes it is in progress.",
+	"ready":      "This iPhone is in the signing profile — tap Install below.",
+}

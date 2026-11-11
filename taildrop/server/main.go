@@ -85,13 +85,14 @@ type server struct {
 	now        func() time.Time
 	mu         sync.Mutex
 	attempts   map[string]*Attempt
-	seen       map[string]*Seen // slug + "/" + vid
+	seen       map[string]*Seen   // slug + "/" + vid
+	devices    map[string]*Device // udid → on-site registration (devices.go)
 	logf       io.Writer
 }
 
 func newServer(root, base string, logf io.Writer) *server {
 	return &server{root: root, base: strings.TrimRight(base, "/"), now: time.Now,
-		attempts: map[string]*Attempt{}, seen: map[string]*Seen{}, logf: logf}
+		attempts: map[string]*Attempt{}, seen: map[string]*Seen{}, devices: map[string]*Device{}, logf: logf}
 }
 
 func (s *server) meta(slug string) (Meta, error) {
@@ -239,6 +240,22 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.ack(w, q.Get("bundle"), q.Get("build"), q.Get("vid"))
 	case r.URL.Path == "/api/status":
 		s.status(w)
+	case r.URL.Path == "/register.mobileconfig":
+		s.enrollConfig(w)
+	case r.URL.Path == "/api/enroll" && r.Method == http.MethodPost:
+		s.enroll(w, r)
+	case r.URL.Path == "/api/devices":
+		s.devicesAPI(w, r, "")
+	case len(parts) == 3 && parts[0] == "api" && parts[1] == "devices":
+		s.devicesAPI(w, r, parts[2])
+	case len(parts) == 3 && parts[0] == "api" && parts[1] == "device": // page: this phone's state
+		d := s.deviceState(parts[2])
+		if d == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(d)
 	case len(parts) == 3 && parts[0] == "api" && parts[1] == "start": // tap beacon
 		m, err := s.meta(parts[2])
 		if err != nil || !idRe.MatchString(id) {
@@ -488,13 +505,17 @@ h1{font-size:28px;margin:0 0 16px}
 #st{position:sticky;top:0;padding:12px 16px;font-weight:600;display:none}
 #st.ok{display:block;background:var(--ok);color:#fff}#st.bad{display:block;background:var(--bad);color:#fff}
 #st.run{display:block;background:var(--line)}
-</style></head><body><div id=st></div>
+#dev{padding:12px 16px;border-bottom:1px solid var(--line);display:none}
+.reg{display:block;margin:20px 0 0;color:var(--mut);font-size:14px}
+</style></head><body><div id=st></div><div id=dev></div>
 <main><h1>Installs</h1>
 {{range .Apps}}<section class=app><img src="{{.Slug}}/icon.png" alt=""><div><b>{{.Name}}</b>
 <small>{{.Version}} ({{.Build}}) · built {{when .Built}}</small>
 <small>{{with index $.Seen .Slug}}last launch {{when .last}} · build {{.build}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch ACK in this app{{end}}{{end}}</small></div>
 <a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
-{{else}}<p>No apps yet.</p>{{end}}</main>
+{{else}}<p>No apps yet.</p>{{end}}
+<a class=reg href="register.mobileconfig">New iPhone, or the icon says “Unable to Install”? Register this iPhone →</a>
+<small class=reg>Downloads a profile: Settings → Profile Downloaded → Install. It only sends this iPhone’s UDID; then the build computer adds it and rebuilds.</small></main>
 <script>
 const CODES={{.Codes}},BASE={{.Base}},st=document.getElementById('st');
 let cur=null;
@@ -517,6 +538,17 @@ async function poll(){
   const j=await r.json();show(j.code);if(j.final)cur=null;
 }
 setInterval(poll,3000);document.addEventListener('visibilitychange',poll);
+// On-site registration: /api/enroll redirects here with ?udid=; remember it and show its state.
+const dev=document.getElementById('dev');
+let udid=new URLSearchParams(location.search).get('udid');
+try{if(udid)localStorage.setItem('udid',udid);else udid=localStorage.getItem('udid')}catch(e){}
+async function devPoll(){
+  if(!udid)return;
+  const d=await fetch('api/device/'+udid).then(r=>r.ok?r.json():null).catch(()=>null);
+  if(!d)return;
+  dev.style.display='block';dev.textContent=d.text+' ['+d.state+(d.build?' · build '+d.build:'')+']';
+}
+devPoll();setInterval(devPoll,15000);
 </script></body></html>`))
 
 func (s *server) page(w http.ResponseWriter) {
@@ -554,6 +586,7 @@ func main() {
 		rf.Close()
 	}
 	s.loadSeen()
+	s.loadDevices()
 	go func() {
 		for range time.Tick(5 * time.Second) {
 			s.sweep()
