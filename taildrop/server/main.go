@@ -517,14 +517,13 @@ h1{font-size:28px;margin:0 0 16px}
 <main><h1>Installs</h1>
 {{range .Apps}}<section class=app><img src="{{.Slug}}/icon.png" alt=""><div><b>{{.Name}}</b>
 <small>{{.Version}} ({{.Build}}) · {{sign .Sign}} · built {{when .Built}}</small>
-<small>{{with index $.Seen .Slug}}last launch {{when .last}} · build {{.build}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch ACK in this app{{end}}{{end}}</small></div>
+<small>{{with index $.Seen .Slug}}last launch {{when .last}} · build {{.build}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch tracking{{end}}{{end}}</small></div>
 <a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
 {{else}}<p>No apps yet.</p>{{end}}
 {{with .Deploys}}<h2 style="font-size:18px;margin:28px 0 8px">Recent deploys</h2>
 {{range .}}<small class=dep>{{when .T}} · {{.Name}} {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{.Git}} · {{.By}}</small>
 {{end}}{{end}}
-<a class=reg href="register.mobileconfig">New iPhone, or the icon says “Unable to Install”? Register this iPhone →</a>
-<small class=reg>Downloads a profile: Settings → Profile Downloaded → Install. It only sends this iPhone’s UDID; then the build computer adds it and rebuilds.</small></main>
+<a class=reg href="register.mobileconfig">Register this iPhone</a></main>
 <script>
 const CODES={{.Codes}},BASE={{.Base}},st=document.getElementById('st');
 let cur=null;
