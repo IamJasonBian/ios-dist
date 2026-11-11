@@ -496,18 +496,22 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
 	"when": func(t float64) string { return time.Unix(int64(t), 0).Format("Jan 2 15:04") },
 	"sign": signLabel,
 }).Parse(`<!doctype html><html><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1"><title>Installs</title>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name=format-detection content="telephone=no"><title>Installs</title>
 <style>
 :root{--bg:#fff;--fg:#000;--mut:#666;--line:#ddd;--ok:#0a7d32;--bad:#b00020}
 @media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#fff;--mut:#999;--line:#333;--ok:#4cd07d;--bad:#ff5c6c}}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px -apple-system,system-ui,sans-serif}
-main{max-width:560px;margin:0 auto;padding:24px 16px}
-h1{font-size:28px;margin:0 0 16px}
-.app{display:flex;gap:14px;align-items:center;padding:14px 0;border-top:1px solid var(--line)}
-.app img{width:60px;height:60px;border-radius:14px;border:1px solid var(--line)}
-.app div{flex:1;min-width:0}.app b{display:block}.app small{color:var(--mut);display:block}
-.app a{background:var(--fg);color:var(--bg);text-decoration:none;padding:8px 16px;border-radius:18px;font-weight:600}
-#st{position:sticky;top:0;padding:12px 16px;font-weight:600;display:none}
+main{max-width:560px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+h1{font-size:28px;margin:0 0 12px}
+.app{display:flex;gap:12px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
+.app img{width:56px;height:56px;border-radius:13px;border:1px solid var(--line);flex:none;background:var(--line)}
+.app div{flex:1;min-width:0}.app b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app small{color:var(--mut);display:block;font-size:13px;line-height:1.35}
+a.btn{flex:none;background:var(--fg);color:var(--bg);text-decoration:none;min-height:44px;min-width:76px;padding:0 16px;border-radius:22px;font-weight:600;display:flex;align-items:center;justify-content:center}
+details{margin:0 0 4px 68px}summary{color:var(--mut);font-size:13px;padding:6px 0;cursor:pointer}
+.old{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:13px;color:var(--mut)}.old span{flex:1;min-width:0}
+.old a{color:var(--fg);font-weight:600;min-height:44px;display:flex;align-items:center;padding:0 8px}
+#st{position:sticky;top:0;z-index:1;padding:12px 16px;padding-top:max(12px,env(safe-area-inset-top));font-weight:600;display:none}
 #st.ok{display:block;background:var(--ok);color:#fff}#st.bad{display:block;background:var(--bad);color:#fff}
 #st.run{display:block;background:var(--line)}
 #dev{padding:12px 16px;border-bottom:1px solid var(--line);display:none}
@@ -516,9 +520,12 @@ h1{font-size:28px;margin:0 0 16px}
 </style></head><body><div id=st></div><div id=dev></div>
 <main><h1>Installs</h1>
 {{range .Apps}}<section class=app><img src="{{.Slug}}/icon.png" alt=""><div><b>{{.Name}}</b>
-<small>{{.Version}} ({{.Build}}) · {{sign .Sign}} · built {{when .Built}}</small>
-<small>{{with index $.Seen .Slug}}last launch {{when .last}} · build {{.build}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch tracking{{end}}{{end}}</small></div>
-<a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
+<small>{{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</small>
+<small>{{with index $.Seen .Slug}}last launch {{when .last}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch tracking{{end}}{{end}}</small></div>
+<a class=btn data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
+{{with .Older}}<details><summary>{{len .}} older build{{if gt (len .) 1}}s{{end}}</summary>
+{{range .}}<div class=old><span>{{.Name}} · {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</span><a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></div>
+{{end}}</details>{{end}}
 {{else}}<p>No apps yet.</p>{{end}}
 {{with .Deploys}}<h2 style="font-size:18px;margin:28px 0 8px">Recent deploys</h2>
 {{range .}}<small class=dep>{{when .T}} · {{.Name}} {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{.Git}} · {{.By}}</small>
@@ -569,9 +576,31 @@ func redirector(target string) http.Handler {
 	})
 }
 
+// appRow is one app on the page: its newest build, plus older entries that share the bundle
+// (e.g. an Ad Hoc build, or a PR build) collapsed under it.
+type appRow struct {
+	Meta
+	Older []Meta
+}
+
+// latestPerApp collapses entries with the same bundle id to the newest build; apps arrive newest first.
+func latestPerApp(apps []Meta) []appRow {
+	var rows []appRow
+	at := map[string]int{}
+	for _, m := range apps {
+		if i, ok := at[m.Bundle]; ok {
+			rows[i].Older = append(rows[i].Older, m)
+			continue
+		}
+		at[m.Bundle] = len(rows)
+		rows = append(rows, appRow{Meta: m})
+	}
+	return rows
+}
+
 func (s *server) page(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	data := map[string]any{"Apps": s.apps(), "Seen": s.lastSeen(), "Codes": codeText(), "Base": s.base, "Deploys": s.deploys(10)}
+	data := map[string]any{"Apps": latestPerApp(s.apps()), "Seen": s.lastSeen(), "Codes": codeText(), "Base": s.base, "Deploys": s.deploys(10)}
 	if err := pageTmpl.Execute(w, data); err != nil {
 		log.Print(err)
 	}

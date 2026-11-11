@@ -328,3 +328,13 @@ func TestRedirectorKeepsPathQueryAndMethod(t *testing.T) {
 		}
 	}
 }
+
+func TestLatestPerAppCollapsesByBundle(t *testing.T) {
+	rows := latestPerApp([]Meta{
+		{Slug: "chordcoach-adhoc", Bundle: "c", Built: 3}, {Slug: "postings-pr7", Bundle: "p", Built: 2},
+		{Slug: "chordcoach", Bundle: "c", Built: 1}, {Slug: "postings", Bundle: "p", Built: 0},
+	})
+	if len(rows) != 2 || rows[0].Slug != "chordcoach-adhoc" || rows[0].Older[0].Slug != "chordcoach" || rows[1].Older[0].Slug != "postings" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}

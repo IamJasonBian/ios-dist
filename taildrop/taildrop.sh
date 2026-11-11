@@ -114,7 +114,8 @@ fi; rm -rf $OUT/pkg
 NAME=$(plutil -extract CFBundleDisplayName raw "$APP/Info.plist" 2>/dev/null || plutil -extract CFBundleName raw "$APP/Info.plist")
 VER=$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")
 ICONS=("$APP"/AppIcon60x60@2x.png(N) "$APP"/AppIcon*.png(N))
-if (( $#ICONS )); then cp "${ICONS[1]}" $OUT/icon.png
+# App icons in the bundle are Xcode's iPhone-optimized PNGs (CgBI) that browsers can't decode; sips rewrites a standard PNG.
+if (( $#ICONS )); then sips -s format png "${ICONS[1]}" --out $OUT/icon.png >/dev/null
 else magick -size 120x120 xc:black -fill white -font "/System/Library/Fonts/Supplemental/Arial Bold.ttf" -pointsize 72 -gravity center -annotate 0 "${NAME[1]}" $OUT/icon.png
 fi
 SIGNED=${SIGN:-debugging}
