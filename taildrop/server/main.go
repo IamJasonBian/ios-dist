@@ -560,6 +560,16 @@ async function devPoll(){
 devPoll();setInterval(devPoll,15000);
 </script></body></html>`))
 
+// redirector sends every request to the same path under target. 307 keeps the method and
+// body, so POSTs (e.g. /api/enroll) survive the hop; old links to another host keep working.
+func redirector(target string) http.Handler {
+	target = strings.TrimRight(target, "/")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	})
+}
+
 func (s *server) page(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	data := map[string]any{"Apps": s.apps(), "Seen": s.lastSeen(), "Codes": codeText(), "Base": s.base, "Deploys": s.deploys(10)}
@@ -572,7 +582,12 @@ func main() {
 	root := flag.String("root", "~/taildrop-ota", "directory holding <slug>/{app.ipa,icon.png,meta.json}")
 	addr := flag.String("addr", "127.0.0.1:8799", "listen address (behind tailscale serve)")
 	base := flag.String("base", "", "public base URL, e.g. https://great-lakes.tail70b2c1.ts.net:8443/ota")
+	redirect := flag.String("redirect", "", "front-door mode: 307 every request to this base URL + its path (no store)")
 	flag.Parse()
+	if *redirect != "" {
+		log.Printf("redirecting %s → %s", *addr, *redirect)
+		log.Fatal(http.ListenAndServe(*addr, redirector(*redirect)))
+	}
 	if *base == "" {
 		log.Fatal("-base is required")
 	}

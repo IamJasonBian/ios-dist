@@ -317,3 +317,14 @@ func TestDeploysNewestFirstSkipsTorn(t *testing.T) {
 		t.Fatal("page lacks the deploy list")
 	}
 }
+
+func TestRedirectorKeepsPathQueryAndMethod(t *testing.T) {
+	h := redirector("https://c/ota/")
+	for _, tc := range []struct{ method, path string }{{"GET", "/"}, {"GET", "/demo/manifest.plist?a=x1"}, {"POST", "/api/enroll"}} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != 307 || w.Header().Get("Location") != "https://c/ota"+tc.path {
+			t.Fatalf("%s %s → %d %q", tc.method, tc.path, w.Code, w.Header().Get("Location"))
+		}
+	}
+}
