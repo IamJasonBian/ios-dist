@@ -14,6 +14,8 @@ from pathlib import Path
 ROOT = Path(sys.argv[1]).expanduser()
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8799
 EVENTS = ROOT / "events.jsonl"
+# Must match the keys of the page's ERRORS table; /api/report rejects anything else.
+REPORT_CODES = {"ERRORS.unreachable", "ERRORS.neverDownloaded", "ERRORS.neverLaunched", "ERRORS.unableToInstall"}
 
 
 def record(slug: str, kind: str) -> None:
@@ -69,29 +71,35 @@ const ERRORS={
   unableToInstall:n=>'iOS couldn’t install '+n+': this iPhone isn’t in the app’s signing profile (or its iOS is older than the app needs). Register the UDID, rebuild, and send the link again.',
 };
 const st=document.getElementById('st'),unable=document.getElementById('unable');
-function show(cls,msg){st.className=cls;st.textContent=msg;if(cls!=='run'&&navigator.vibrate)navigator.vibrate(200)}
+const TABLES={PROGRESS,ERRORS};
+// Each banner shows its code (e.g. ERRORS.unreachable); every ERRORS code is also logged on the server.
+function show(cls,code){
+  const [table,key]=code.split('.');
+  st.className=cls;st.textContent=TABLES[table][key](last.name)+' ['+code+']';
+  if(table==='ERRORS')fetch('api/report/'+encodeURIComponent(last.slug)+'/'+code).catch(()=>{});
+  if(cls!=='run'&&navigator.vibrate)navigator.vibrate(200);
+}
 let watch=null,last=null;
 document.querySelectorAll('a[data-slug]').forEach(a=>a.addEventListener('click',()=>{
   watch=last={slug:a.dataset.slug,name:a.dataset.name,checkin:a.dataset.checkin==='1',since:Date.now()/1000,got:new Set()};
-  unable.hidden=true;show('run',PROGRESS.installing(watch.name));
+  unable.hidden=true;show('run','PROGRESS.installing');
 }));
 unable.addEventListener('click',()=>{
   if(!last)return;
-  fetch('api/report/'+encodeURIComponent(last.slug)+'/unable').catch(()=>{});
-  watch=null;unable.hidden=true;show('bad',ERRORS.unableToInstall(last.name));
+  watch=null;unable.hidden=true;show('bad','ERRORS.unableToInstall');
 });
 async function poll(){
   if(!watch)return;
   const r=await fetch('api/events?since='+watch.since).then(r=>r.json()).catch(()=>null);
-  if(!r){show('bad',ERRORS.unreachable());watch=null;return}
+  if(!r){show('bad','ERRORS.unreachable');watch=null;return}
   r.filter(e=>e.slug===watch.slug).forEach(e=>watch.got.add(e.kind));
-  const age=Date.now()/1000-watch.since,n=watch.name;
-  if(watch.got.has('launch')){show('ok',PROGRESS.launched(n));watch=null;return}
-  if(!watch.got.has('ipa')){if(age>45){show('bad',ERRORS.neverDownloaded(n));watch=null}return}
+  const age=Date.now()/1000-watch.since;
+  if(watch.got.has('launch')){show('ok','PROGRESS.launched');watch=null;return}
+  if(!watch.got.has('ipa')){if(age>45){show('bad','ERRORS.neverDownloaded');watch=null}return}
   unable.hidden=false;  // iOS never reports install failure, so offer the explicit path once the IPA is down
-  if(!watch.checkin){show('ok',PROGRESS.downloaded(n));watch=null}
-  else if(age>180){show('bad',ERRORS.neverLaunched(n));watch=null}
-  else show('run',PROGRESS.awaitingLaunch(n));
+  if(!watch.checkin){show('ok','PROGRESS.downloaded');watch=null}
+  else if(age>180){show('bad','ERRORS.neverLaunched');watch=null}
+  else show('run','PROGRESS.awaitingLaunch');
 }
 setInterval(poll,3000);document.addEventListener('visibilitychange',poll);
 </script></body></html>"""
@@ -131,8 +139,12 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/launch/"):  # optional app check-in on first launch
             record(path.rsplit("/", 1)[1], "launch")
             return self._send("ok", "text/plain")
-        if path.startswith("/api/report/") and path.endswith("/unable"):  # phone-reported "Unable to Install"
-            record(path.split("/")[3], "unable")
+        if path.startswith("/api/report/"):  # phone-reported error, logged under its ERRORS.<name> code
+            _, _, _, slug, code = (path.split("/") + [""])[:5]
+            if code not in REPORT_CODES:
+                self.send_error(400, "unknown code")
+                return
+            record(slug, code)
             return self._send("ok", "text/plain")
         slug, _, name = path.strip("/").partition("/")
         if name == "manifest.plist":
