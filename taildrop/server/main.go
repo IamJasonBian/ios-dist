@@ -493,8 +493,9 @@ func (s *server) ipa(w http.ResponseWriter, r *http.Request, slug, id string) {
 }
 
 var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
-	"when": func(t float64) string { return time.Unix(int64(t), 0).Format("Jan 2 15:04") },
-	"sign": signLabel,
+	"when":     func(t float64) string { return time.Unix(int64(t), 0).Format("Jan 2 15:04") },
+	"sign":     signLabel,
+	"gitKnown": func(g string) bool { return g != "" && g != "none" },
 }).Parse(`<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name=format-detection content="telephone=no"><title>Installs</title>
 <style>
@@ -521,14 +522,14 @@ details{margin:0 0 4px 68px}summary{color:var(--mut);font-size:13px;padding:6px 
 <main><h1>Installs</h1>
 {{range .Apps}}<section class=app><img src="{{.Slug}}/icon.png" alt=""><div><b>{{.Name}}</b>
 <small>{{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</small>
-<small>{{with index $.Seen .Slug}}last launch {{when .last}} · {{.phones}} phone(s){{else}}{{if eq .Ack 1}}no launches yet{{else}}no launch tracking{{end}}{{end}}</small></div>
+{{with index $.Seen .Slug}}<small>last launch {{when .last}} · {{.phones}} phone(s)</small>{{else}}{{if eq .Ack 1}}<small>no launches yet</small>{{end}}{{end}}</div>
 <a class=btn data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></section>
 {{with .Older}}<details><summary>{{len .}} older build{{if gt (len .) 1}}s{{end}}</summary>
 {{range .}}<div class=old><span>{{.Name}} · {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{when .Built}}</span><a data-slug="{{.Slug}}" data-name="{{.Name}}" href="#">Install</a></div>
 {{end}}</details>{{end}}
 {{else}}<p>No apps yet.</p>{{end}}
 {{with .Deploys}}<h2 style="font-size:18px;margin:28px 0 8px">Recent deploys</h2>
-{{range .}}<small class=dep>{{when .T}} · {{.Name}} {{.Version}} ({{.Build}}) · {{sign .Sign}} · {{.Git}} · {{.By}}</small>
+{{range .}}<small class=dep>{{when .T}} · {{.Name}} {{.Version}} ({{.Build}}) · {{sign .Sign}}{{if gitKnown .Git}} · {{.Git}}{{end}} · {{.By}}</small>
 {{end}}{{end}}
 <a class=reg href="register.mobileconfig">Register this iPhone</a></main>
 <script>

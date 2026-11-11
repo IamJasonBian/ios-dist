@@ -139,7 +139,7 @@ done
 GIT=$(git -C "$PROJ" rev-parse --short HEAD 2>/dev/null || echo none)
 [[ -n $(git -C "$PROJ" status --porcelain 2>/dev/null) ]] && GIT=$GIT-dirty
 python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","version","build","bundle","sign","git","by"],sys.argv[1:9]),t=time.time())))' \
-  $SLUG "$NAME" $VER $BUILD $BUNDLE $SIGNED $GIT ${HOST_ALIAS:-$(hostname -s)} | ssh $SERVER "cat >> $REMOTE/deploys.jsonl"
+  $SLUG "$NAME" $VER $BUILD $BUNDLE $SIGNED $GIT ${HOST_ALIAS:-$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["Self"]["DNSName"].split(".")[0])' 2>/dev/null || hostname -s)} | ssh $SERVER "cat >> $REMOTE/deploys.jsonl"
 echo "  deploy recorded: $SLUG $BUILD ($SIGNED, $GIT)"
 
 [[ $DEV == - ]] && { echo "link: $ALL"; exit 0; }
