@@ -245,3 +245,48 @@ func TestRepublishMidDownloadConflicts(t *testing.T) {
 		t.Fatalf("status %d, want 409", w.Code)
 	}
 }
+
+// enrollBody mimics iOS's reply: binary PKCS#7 bytes around the attribute plist.
+const enrollBody = "\x30\x82\x01junk<?xml version=\"1.0\"?><plist><dict>" +
+	"<key>PRODUCT</key><string>iPhone16,1</string><key>UDID</key><string>00008130-0012304226E0001C</string>" +
+	"<key>VERSION</key><string>23C55</string><key>DEVICE_NAME</key><string>Test Phone</string></dict></plist>\x00\xa0sig"
+
+func TestEnrollQueuesPhoneAndRedirects(t *testing.T) {
+	f := newFixture(t)
+	if w := f.get("/register.mobileconfig"); !strings.Contains(w.Body.String(), "https://h/ota/api/enroll") ||
+		w.Header().Get("Content-Type") != "application/x-apple-aspen-config" {
+		t.Fatalf("profile: %s %q", w.Header().Get("Content-Type"), w.Body.String())
+	}
+	r := httptest.NewRequest("POST", "/api/enroll", strings.NewReader(enrollBody))
+	w := httptest.NewRecorder()
+	f.s.ServeHTTP(w, r)
+	udid := "00008130-0012304226E0001C"
+	if w.Code != 301 || w.Header().Get("Location") != "https://h/ota/?udid="+udid {
+		t.Fatalf("enroll %d → %q", w.Code, w.Header().Get("Location"))
+	}
+	d := f.s.devices[udid]
+	if d == nil || d.State != "pending" || d.Product != "iPhone16,1" || d.Name != "Test Phone" {
+		t.Fatalf("device %+v", d)
+	}
+	f.get("/api/devices/" + udid + "?state=ready&build=B9")
+	if d.State != "ready" || d.Build != "B9" {
+		t.Fatalf("after ready: %+v", d)
+	}
+	if w := f.get("/api/devices/" + udid + "?state=bogus"); w.Code != 400 {
+		t.Fatalf("bogus state accepted: %d", w.Code)
+	}
+	// Re-enrolling a ready phone keeps its state.
+	f.s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/enroll", strings.NewReader(enrollBody)))
+	if d.State != "ready" {
+		t.Fatalf("re-enroll reset state to %s", d.State)
+	}
+}
+
+func TestEnrollRejectsBodyWithoutUDID(t *testing.T) {
+	f := newFixture(t)
+	w := httptest.NewRecorder()
+	f.s.ServeHTTP(w, httptest.NewRequest("POST", "/api/enroll", strings.NewReader("<plist></plist>")))
+	if w.Code != 400 || len(f.s.devices) != 0 {
+		t.Fatalf("status %d, %d devices", w.Code, len(f.s.devices))
+	}
+}
