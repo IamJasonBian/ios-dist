@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 // Code is one install status. Every banner, attempt response and events.jsonl line uses
 // Code.Name; this table is the only place codes are defined.
 type Code struct {
@@ -15,7 +17,7 @@ var Codes = []Code{
 	{
 		Name:    "installing",
 		Legacy:  []string{"PROGRESS.installing"},
-		Trigger: "Install tapped or manifest fetched; app.ipa not fully sent yet",
+		Trigger: "Install tapped or manifest fetched; app.ipa not fully sent yet (each chunk sent resets the idle timer)",
 		Text:    "Installing {n}…",
 	},
 	{
@@ -27,7 +29,7 @@ var Codes = []Code{
 	{
 		Name:    "installed",
 		Legacy:  []string{"PROGRESS.launched"},
-		Trigger: "app sent GET /api/ack/<slug>?build=<this build> on first launch",
+		Trigger: "app sent GET /api/ack?bundle=&build=<this build>&vid= (sent on every launch)",
 		Text:    "{n} installed and opened ✓",
 	},
 
@@ -35,19 +37,19 @@ var Codes = []Code{
 	{
 		Name:    "failed.download",
 		Legacy:  []string{"ERRORS.neverDownloaded"},
-		Trigger: "installing, and no manifest/app.ipa traffic for 45 s",
+		Trigger: fmt.Sprintf("installing, and no manifest/app.ipa traffic for %v", downloadIdle),
 		Text:    "{n} never finished downloading — tap Install in the iOS prompt, or resend the link",
 	},
 	{
 		Name:    "failed.launch",
 		Legacy:  []string{"ERRORS.neverLaunched", "ERRORS.unableToInstall"},
-		Trigger: "downloaded, app has ack:1, and no launch ACK within 3 min",
+		Trigger: fmt.Sprintf("downloaded, app has ack:1, and no launch ACK within %v", launchWait),
 		Text:    "{n} downloaded but never opened — if its icon says “Unable to Install”, register this iPhone, rebuild, resend",
 	},
 	{
 		Name:    "failed.unreachable",
 		Legacy:  []string{"ERRORS.unreachable"},
-		Trigger: "page only: the poll to the server failed, so the server never logs it",
+		Trigger: "page only: the poll to the server failed, so the server never logs it. A 404 for the attempt (server never saw the tap) shows failed.download",
 		Text:    "Install server unreachable — is Tailscale on?",
 	},
 }

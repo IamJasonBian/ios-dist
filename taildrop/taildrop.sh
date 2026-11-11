@@ -5,7 +5,7 @@
 # Usage: taildrop.sh <tailnet-device|-> <project-dir> <scheme> <bundle-id> [xcodebuild args...]
 #   device "-" → build + serve only, no Taildrop
 #   UDID=<udid> env → fail if the signed profile lacks that phone
-#   ACK=1 env      → app sends GET /ota/api/ack/<slug>?build= on first launch (enables failed.launch)
+#   ACK=1 env      → app has client/TaildropAck.swift (GET /ota/api/ack on every launch; enables installed/failed.launch)
 set -euo pipefail
 
 DEV=$1 PROJ=$2 SCHEME=$3 BUNDLE=$4; shift 4
@@ -65,10 +65,11 @@ python3 -c 'import json,sys,time;print(json.dumps(dict(zip(["slug","name","versi
   $SLUG "$NAME" $VER $BUILD $BUNDLE ${ACK:-0} > $OUT/meta.json
 
 echo "▶ publish → $SERVER:$REMOTE/$SLUG (server/main.go, behind tailscale serve :$HTTPS/ota)"
-ssh $SERVER "mkdir -p $REMOTE/$SLUG"
-rsync -a $OUT/app.ipa $OUT/icon.png $SERVER:$REMOTE/$SLUG/
-rsync -a $OUT/meta.json $SERVER:$REMOTE/$SLUG/   # last, so the page never lists a half-copied app
-for u in $ALL $BASE/icon.png "$BASE/manifest.plist?a=publish0"; do
+# Stage in <slug>.new, then swap dirs, so the page never sees a new ipa with an old meta.json.
+ssh $SERVER "rm -rf $REMOTE/$SLUG.new && mkdir -p $REMOTE/$SLUG.new"
+rsync -a $OUT/app.ipa $OUT/icon.png $OUT/meta.json $SERVER:$REMOTE/$SLUG.new/
+ssh $SERVER "cd $REMOTE && rm -rf $SLUG.old && { [ ! -d $SLUG ] || mv $SLUG $SLUG.old; } && mv $SLUG.new $SLUG && rm -rf $SLUG.old"
+for u in $ALL $BASE/icon.png $BASE/manifest.plist; do   # no ?a= → health check, no attempt logged
   code=$(curl -s -o /dev/null -w '%{http_code}' "$u")
   echo "  ${u#https://$HOST:$HTTPS} $code"; [[ $code == 200 ]] || { echo "link not serving — is the server up on $SERVER?"; exit 1; }
 done

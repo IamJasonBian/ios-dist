@@ -24,7 +24,7 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
  │        ▼                                                         │
  │ (old local server; now server/main.go on great-lakes — see below)│
  │   /            all-installs page + status banner JS              │
- │   /api/events  manifest / ipa / launch events ← events.jsonl     │
+ │   /api/attempt/<id>  per-tap state · /api/ack  launch ACK        │
  │        ▲                                                         │
  │ tailscale serve  :8443/ota   (HTTPS, tailnet-only)               │
  └────────┬───────────────────────────────────┬─────────────────────┘
@@ -34,12 +34,12 @@ taildrop/taildrop.sh - <proj> <scheme> <bundle-id>   # publish only, no Taildrop
  PHONE  great-lakes-leader (iPhone 15 Pro)    │
  ┌────────────────────────────────────────────┴─────────────────────┐
  │ 2. Files → Tailscale → link → Safari: /ota/  → tap Install       │
- │ 4. banner polls /api/events every 3s:                            │
+ │ 4. banner polls /api/attempt/<id> every 3s:                      │
  │      red   server unreachable · no download in 45s               │
  │      green app.ipa downloaded                                    │
  │ 5. iOS installs/replaces (same bundle + team → data kept)        │
  │    signature fail → iOS "Unable to Install" (native)             │
- │    [opt-in] app GETs /api/launch/<slug> → "opened ✓"             │
+ │    [ACK=1] app GETs /api/ack?bundle=&build=&vid= → installed     │
  │ 6. app runtime → backend                                         │
  └──────────────┬───────────────────────────────────────────────────┘
                 │ Chord Coach: http://100.117.72.33:8766
