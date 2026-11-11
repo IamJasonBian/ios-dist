@@ -22,6 +22,7 @@ Builds Debug for `generic/platform=iOS` with the laptop ASC key, stamping `CURRE
 |---|---|---|---|---|
 | Chord Coach | `~/Desktop/apollo/chord-coach/ios` | `ChordCoach` | `app.greatlakes.chordcoach` | `INFOPLIST_FILE=$HOME/.claude/skills/taildrop/overrides/chordcoach-Info.plist` (server URL = Studio tailnet `http://100.117.72.33:8766/`; CFBundleVersion = `$(CURRENT_PROJECT_VERSION)`; no app icon → script draws a letter tile) |
 | Postings | `~/Desktop/apollo/alpha/postings-ios` | `Postings` | `com.trypostings.app` | `-scmProvider system` (private postings-dist) |
+| Allocate | `~/Desktop/apollo/alpha/nbis-desk/ios` | `Allocate` | `app.greatlakes.allocate` | — (formerly NBIS Desk / `nbisdesk`; icon from `ios/scripts/make_icon.sh`) |
 
 ## Before running
 - `tailscale status | grep iOS` for the device name (phones get renamed; e.g. iphone192 → queensborough-leader, iphone-15-pro → great-lakes-leader).

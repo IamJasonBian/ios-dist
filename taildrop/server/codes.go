@@ -13,6 +13,9 @@ type Code struct {
 }
 
 // Codes, in the order an install moves through them. Errors are the failed.* rows.
+//
+// TODO: first-class path for a phone that isn't in the signing profile (iOS shows "Unable
+// to Install" and tells the server nothing). Today it ends as downloaded / failed.launch.
 var Codes = []Code{
 	// ── progress ──────────────────────────────────────────────────────────────
 	{
@@ -25,7 +28,6 @@ var Codes = []Code{
 		Name:    "downloaded",
 		Legacy:  []string{"PROGRESS.downloaded", "PROGRESS.awaitingLaunch"},
 		Trigger: "every byte of app.ipa sent (also from failed.download, if the user sat on the iOS prompt); final for apps without a launch ACK",
-		Fix:     "if the home-screen icon says Unable to Install: phone not in the signing profile (or iOS too old) → register, rebuild, resend",
 		Text:    "{n} downloaded",
 	},
 	{
@@ -47,7 +49,7 @@ var Codes = []Code{
 		Name:    "failed.launch",
 		Legacy:  []string{"ERRORS.neverLaunched", "ERRORS.unableToInstall"},
 		Trigger: fmt.Sprintf("downloaded, app has ack:1, and no launch ACK within %v", launchWait),
-		Fix:     "if the icon says Unable to Install: register this iPhone, rebuild, resend; else open the app",
+		Fix:     "open the app",
 		Text:    "{n} not opened",
 	},
 	{
